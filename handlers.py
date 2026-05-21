@@ -119,7 +119,7 @@ async def prompt_custom_question(
 ) -> None:
     chart = get_active_chart(user_id)
     if not chart:
-        await msg.answer("Выбери активную карту в 🌙 Мои карты")
+        await msg.answer("Выбери активную карту в 📋 Все карты")
         return
     left = question_balance(chart)
     if left <= 0:
@@ -137,7 +137,7 @@ async def prompt_custom_question(
 async def deliver_full_chart(msg: Message, user_id: int) -> None:
     chart = get_active_chart(user_id)
     if not chart:
-        await msg.answer("Сначала выбери или создай карту в 🌙 Мои карты")
+        await msg.answer("Сначала выбери или создай карту в 📋 Все карты")
         return
     if chart.get("full_reading"):
         await msg.answer(f"💎 Полная карта · {chart['profile_name']}\n")
@@ -156,7 +156,7 @@ async def deliver_full_chart(msg: Message, user_id: int) -> None:
 async def deliver_today_horo(msg: Message, user_id: int) -> None:
     chart = get_active_chart(user_id)
     if not chart:
-        await msg.answer("Сначала выбери активную карту в 🌙 Мои карты")
+        await msg.answer("Сначала выбери активную карту в 📋 Все карты")
         return
     await msg.answer(f"📅 Прогноз на сегодня · {chart['profile_name']}…")
     try:
@@ -243,7 +243,7 @@ async def finish_onboarding(msg: Message, state: FSMContext, place: str) -> None
         await msg.answer("🎁 Бесплатный разбор\n")
         await send_chunks(msg, free)
     except asyncio.TimeoutError:
-        await msg.answer("Разбор занял слишком долго. Открой 🌙 Моя карта позже.")
+        await msg.answer("Разбор занял слишком долго. Открой ✨ Текущая карта позже.")
     except Exception as e:
         log.error("openai free: %s", e)
         await msg.answer(f"Не удалось получить разбор: {e}")
@@ -449,7 +449,7 @@ async def m_my_charts(msg: Message) -> None:
     u = get_user(user_id)
     active_id = u.get("active_chart_id") if u else None
     await msg.answer(
-        "🌙 Твои натальные карты\n\n"
+        "📋 Твои натальные карты\n\n"
         "Нажми на карту, чтобы сделать её активной ✅",
         reply_markup=charts_list_kb(charts, active_id),
     )
@@ -493,7 +493,7 @@ async def m_chart(msg: Message) -> None:
     user_id = tid(msg)
     chart = get_active_chart(user_id)
     if not chart:
-        await msg.answer("Сначала создай или выбери карту в 🌙 Мои карты")
+        await msg.answer("Сначала создай или выбери карту в 📋 Все карты")
         return
     prem = " 💎" if chart.get("premium_unlocked") else ""
     await msg.answer(
@@ -539,7 +539,7 @@ async def m_compat(msg: Message, state: FSMContext) -> None:
     user_id = tid(msg)
     chart = get_active_chart(user_id)
     if not chart:
-        await msg.answer("Выбери активную карту в 🌙 Мои карты")
+        await msg.answer("Выбери активную карту в 📋 Все карты")
         return
     if not can_compat(chart):
         await send_paywall_premium(msg)
@@ -555,7 +555,7 @@ async def m_questions(msg: Message) -> None:
     user_id = tid(msg)
     chart = get_active_chart(user_id)
     if not chart:
-        await msg.answer("Выбери активную карту в 🌙 Мои карты")
+        await msg.answer("Выбери активную карту в 📋 Все карты")
         return
     if not can_popular(chart):
         await send_paywall_premium(msg)
@@ -571,7 +571,7 @@ async def m_ask(msg: Message, state: FSMContext) -> None:
     user_id = tid(msg)
     chart = get_active_chart(user_id)
     if not chart:
-        await msg.answer("Выбери активную карту в 🌙 Мои карты")
+        await msg.answer("Выбери активную карту в 📋 Все карты")
         return
     if not can_ask_custom(chart):
         await send_paywall_ask(msg)
@@ -583,7 +583,7 @@ async def m_ask(msg: Message, state: FSMContext) -> None:
 async def m_horo(msg: Message) -> None:
     user_id = tid(msg)
     if not get_active_chart(user_id):
-        await msg.answer("Сначала выбери активную карту в 🌙 Мои карты")
+        await msg.answer("Сначала выбери активную карту в 📋 Все карты")
         return
     chart = get_active_chart(user_id)
     extra = f"Карта: {chart['profile_name']}"
@@ -636,7 +636,7 @@ async def on_ask_text(msg: Message, state: FSMContext) -> None:
     chart = get_active_chart(user_id)
     if not chart:
         await state.clear()
-        await msg.answer("Выбери активную карту в 🌙 Мои карты")
+        await msg.answer("Выбери активную карту в 📋 Все карты")
         return
     if not chart or not can_ask_custom(chart):
         await state.clear()

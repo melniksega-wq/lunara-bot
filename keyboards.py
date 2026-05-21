@@ -24,9 +24,9 @@ KB_ASK = ReplyKeyboardMarkup(
 )
 
 # Меню
-BTN_MY_CHARTS = "🌙 Мои карты"
+BTN_MY_CHARTS = "📋 Все карты"
 BTN_NEW_CHART = "➕ Создать новую карту"
-BTN_CHART = "🌙 Моя карта"
+BTN_CHART = "✨ Текущая карта"
 BTN_PREMIUM = "💎 Premium"
 BTN_SUPPORT = "💬 Поддержка"
 BTN_COMPAT = "❤️ Совместимость"
