@@ -1,7 +1,11 @@
+import asyncio
 import re
+
 from openai import AsyncOpenAI
 
 from config import OPENAI_API_KEY, OPENAI_MODEL
+
+AI_TIMEOUT_SEC = 90
 
 DATE_RE = re.compile(r"^\s*(\d{1,2})[./-](\d{1,2})[./-](\d{2,4})\s*$")
 TIME_RE = re.compile(r"^\s*(\d{1,2}):(\d{2})\s*$")
@@ -68,14 +72,18 @@ def profile_text(user: dict) -> str:
     )
 
 
-async def ask_ai(system: str, user_msg: str) -> str:
+async def ask_ai(system: str, user_msg: str, *, timeout: float = AI_TIMEOUT_SEC) -> str:
     client = AsyncOpenAI(api_key=OPENAI_API_KEY)
-    r = await client.chat.completions.create(
-        model=OPENAI_MODEL,
-        messages=[
-            {"role": "system", "content": system},
-            {"role": "user", "content": user_msg},
-        ],
-        temperature=0.7,
-    )
-    return (r.choices[0].message.content or "").strip()
+
+    async def _call() -> str:
+        r = await client.chat.completions.create(
+            model=OPENAI_MODEL,
+            messages=[
+                {"role": "system", "content": system},
+                {"role": "user", "content": user_msg},
+            ],
+            temperature=0.7,
+        )
+        return (r.choices[0].message.content or "").strip()
+
+    return await asyncio.wait_for(_call(), timeout=timeout)

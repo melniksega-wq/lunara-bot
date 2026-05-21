@@ -1,9 +1,19 @@
 from aiogram.types import InlineKeyboardButton, InlineKeyboardMarkup, KeyboardButton, ReplyKeyboardMarkup
 
 # Onboarding
+BTN_CANCEL = "❌ Отмена"
 BTN_NO_TIME = "Не знаю"
+
+KB_ONBOARD = ReplyKeyboardMarkup(
+    keyboard=[[KeyboardButton(text=BTN_CANCEL)]],
+    resize_keyboard=True,
+)
+
 KB_TIME = ReplyKeyboardMarkup(
-    keyboard=[[KeyboardButton(text=BTN_NO_TIME)]],
+    keyboard=[
+        [KeyboardButton(text=BTN_NO_TIME)],
+        [KeyboardButton(text=BTN_CANCEL)],
+    ],
     resize_keyboard=True,
     one_time_keyboard=True,
 )

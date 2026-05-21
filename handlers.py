@@ -6,17 +6,26 @@ from aiogram.filters import Command, CommandStart, StateFilter
 from aiogram.fsm.context import FSMContext
 from aiogram.types import CallbackQuery, FSInputFile, Message, ReplyKeyboardRemove
 
-from database import get_user, premium, save_texts, set_premium, upsert_user
+from database import (
+    get_user,
+    is_profile_complete,
+    premium,
+    save_progress,
+    save_texts,
+    set_premium,
+    upsert_user,
+)
 from keyboards import (
     BTN_ASK,
+    BTN_CANCEL,
     BTN_CHART,
     BTN_COMPAT,
     BTN_HORO,
-    BTN_NO_TIME,
     BTN_PREMIUM,
     BTN_QUESTIONS,
     BTN_SUPPORT,
     KB_HORO,
+    KB_ONBOARD,
     KB_PAYWALL,
     KB_POPULAR,
     KB_TIME,
@@ -39,6 +48,8 @@ from states import Ask, Onboarding, Partner
 
 log = logging.getLogger(__name__)
 router = Router()
+
+CHART_TIMEOUT_SEC = 45
 
 WELCOME = (
     "✨ Добро пожаловать в Lunara\n\n"
@@ -71,8 +82,93 @@ def tid(msg: Message) -> int:
 
 
 async def show_menu(msg: Message, user_id: int) -> None:
-    p = premium(user_id)
-    await msg.answer("Выбери раздел 👇", reply_markup=menu_kb(p))
+    await msg.answer("Выбери раздел 👇", reply_markup=menu_kb(premium(user_id)))
+
+
+def onboarding_data(data: dict, user_id: int) -> dict | None:
+    """FSM + черновик в БД, если память сбросилась (Railway restart)."""
+    db = get_user(user_id) or {}
+    merged = {
+        "name": data.get("name") or db.get("name"),
+        "birth_date": data.get("birth_date") or db.get("birth_date"),
+        "birth_time": data.get("birth_time") or db.get("birth_time"),
+        "birth_place": data.get("birth_place") or db.get("birth_place"),
+    }
+    if not all(merged.values()):
+        return None
+    return merged
+
+
+async def finish_onboarding(msg: Message, state: FSMContext, place: str) -> None:
+    user_id = tid(msg)
+    data = await state.get_data()
+    data["birth_place"] = place
+    profile = onboarding_data(data, user_id)
+    if not profile:
+        await state.set_state(Onboarding.name)
+        await msg.answer(
+            "Сессия сбросилась. Начнём заново — как тебя зовут?",
+            reply_markup=KB_ONBOARD,
+        )
+        return
+
+    upsert_user(
+        user_id,
+        profile["name"],
+        profile["birth_date"],
+        profile["birth_time"],
+        place,
+    )
+    user = get_user(user_id)
+    await state.clear()
+
+    await msg.answer(
+        "✨ Приняла! Считаю карту и готовлю разбор — это 1–2 минуты.\n"
+        "Меню появится внизу, когда всё будет готово 👇",
+        reply_markup=menu_kb(False),
+    )
+
+    await anim(msg)
+
+    try:
+        from chart_generator import generate_natal_chart_png
+
+        path = await asyncio.wait_for(
+            asyncio.to_thread(
+                generate_natal_chart_png,
+                telegram_id=user_id,
+                name=user["name"],
+                birth_date=user["birth_date"],
+                birth_time=user["birth_time"],
+                birth_place=place,
+            ),
+            timeout=CHART_TIMEOUT_SEC,
+        )
+        await msg.answer_photo(FSInputFile(path), caption="✨ Твоя натальная карта")
+    except asyncio.TimeoutError:
+        log.warning("chart timeout user=%s", user_id)
+        await msg.answer("Карта долго строилась — продолжаю с текстовым разбором.")
+    except Exception as e:
+        log.warning("chart: %s", e)
+        await msg.answer("Карту не удалось построить — даю текстовый разбор.")
+
+    free = None
+    try:
+        free = await ask_ai(PROMPT_FREE, "Данные:\n" + profile_text(user))
+        save_texts(user_id, free=free)
+        await msg.answer("🎁 Бесплатный разбор\n")
+        await send_chunks(msg, free)
+    except asyncio.TimeoutError:
+        await msg.answer("Разбор занял слишком долго. Нажми 🌙 Моя карта позже или /start.")
+    except Exception as e:
+        log.error("openai free: %s", e)
+        await msg.answer(
+            f"Не удалось получить разбор: {e}\n"
+            "Попробуй 🌙 Моя карта позже или напиши в 💬 Поддержка."
+        )
+
+    await msg.answer(PAYWALL_TEXT, reply_markup=KB_PAYWALL)
+    await show_menu(msg, user_id)
 
 
 # ─── /start ───────────────────────────────────────────────────────────
@@ -82,24 +178,28 @@ async def show_menu(msg: Message, user_id: int) -> None:
 async def start(msg: Message, state: FSMContext) -> None:
     await state.clear()
     u = get_user(tid(msg))
-    if u and u.get("name"):
+    if is_profile_complete(u):
         await msg.answer(
             f"С возвращением, {u['name']} ✨",
             reply_markup=menu_kb(premium(tid(msg))),
         )
         return
     await state.set_state(Onboarding.name)
-    await msg.answer(WELCOME, reply_markup=ReplyKeyboardRemove())
+    await msg.answer(WELCOME, reply_markup=KB_ONBOARD)
 
 
 @router.message(Command("cancel"))
+@router.message(StateFilter(Onboarding), F.text == BTN_CANCEL)
 async def cancel(msg: Message, state: FSMContext) -> None:
     await state.clear()
     u = get_user(tid(msg))
-    if u:
+    if is_profile_complete(u):
         await msg.answer("Отменено.", reply_markup=menu_kb(premium(tid(msg))))
     else:
-        await msg.answer("Отменено. /start — начать.")
+        await msg.answer(
+            "Онбординг отменён. Нажми /start чтобы начать снова ✨",
+            reply_markup=ReplyKeyboardRemove(),
+        )
 
 
 # ─── Onboarding ───────────────────────────────────────────────────────
@@ -107,85 +207,68 @@ async def cancel(msg: Message, state: FSMContext) -> None:
 
 @router.message(Onboarding.name, F.text)
 async def on_name(msg: Message, state: FSMContext) -> None:
+    if msg.text == BTN_CANCEL:
+        return
     name = msg.text.strip()
     if len(name) < 2:
         await msg.answer("Напиши имя полностью 🙏")
         return
     await state.update_data(name=name)
+    save_progress(tid(msg), name=name)
     await state.set_state(Onboarding.date)
-    await msg.answer("Шаг 2 из 4 — дата рождения (ДД.ММ.ГГГГ)")
+    await msg.answer("Шаг 2 из 4 — дата рождения (ДД.ММ.ГГГГ)", reply_markup=KB_ONBOARD)
 
 
 @router.message(Onboarding.date, F.text)
 async def on_date(msg: Message, state: FSMContext) -> None:
+    if msg.text == BTN_CANCEL:
+        return
     d = parse_date(msg.text)
     if not d:
         await msg.answer("Формат: 15.03.1990")
         return
     await state.update_data(birth_date=d)
+    save_progress(tid(msg), birth_date=d)
     await state.set_state(Onboarding.time)
     await msg.answer("Шаг 3 из 4 — время (ЧЧ:ММ) или «Не знаю»", reply_markup=KB_TIME)
 
 
 @router.message(Onboarding.time, F.text)
 async def on_time(msg: Message, state: FSMContext) -> None:
+    if msg.text == BTN_CANCEL:
+        return
     t = parse_time(msg.text)
     if not t:
         await msg.answer("ЧЧ:ММ или кнопка «Не знаю»")
         return
     await state.update_data(birth_time=t)
+    save_progress(tid(msg), birth_time=t)
     await state.set_state(Onboarding.place)
-    await msg.answer("Шаг 4 из 4 — место рождения (город, страна)", reply_markup=ReplyKeyboardRemove())
+    await msg.answer(
+        "Шаг 4 из 4 — место рождения (город, страна)\n"
+        "Например: Москва, Россия",
+        reply_markup=KB_ONBOARD,
+    )
+
+
+@router.message(Onboarding.place, F.location)
+async def on_place_location(msg: Message, state: FSMContext) -> None:
+    await msg.answer(
+        "📍 Геолокацию вижу. Для точной карты напиши город текстом:\n"
+        "Москва, Россия",
+        reply_markup=KB_ONBOARD,
+    )
 
 
 @router.message(Onboarding.place, F.text)
 async def on_place(msg: Message, state: FSMContext) -> None:
+    if msg.text == BTN_CANCEL:
+        return
     place = msg.text.strip()
     if len(place) < 2:
-        await msg.answer("Укачни город и страну")
+        await msg.answer("Укажи город и страну, например: Москва, Россия")
         return
-
-    data = await state.get_data()
-    user_id = tid(msg)
-    upsert_user(
-        user_id,
-        data["name"],
-        data["birth_date"],
-        data["birth_time"],
-        place,
-    )
-    user = get_user(user_id)
-    await state.clear()
-
-    await anim(msg)
-
-    try:
-        from chart_generator import generate_natal_chart_png
-
-        path = await asyncio.to_thread(
-            generate_natal_chart_png,
-            telegram_id=user_id,
-            name=user["name"],
-            birth_date=user["birth_date"],
-            birth_time=user["birth_time"],
-            birth_place=place,
-        )
-        await msg.answer_photo(FSInputFile(path), caption="✨ Твоя натальная карта")
-    except Exception as e:
-        log.warning("chart: %s", e)
-        await msg.answer("Карту не удалось построить — даю текстовый разбор.")
-
-    try:
-        free = await ask_ai(PROMPT_FREE, "Данные:\n" + profile_text(user))
-    except Exception as e:
-        await msg.answer(f"Ошибка OpenAI: {e}\nПроверь OPENAI_API_KEY на Railway.")
-        return
-
-    save_texts(user_id, free=free)
-    await msg.answer("🎁 Бесплатный разбор\n")
-    await send_chunks(msg, free)
-    await msg.answer(PAYWALL_TEXT, reply_markup=KB_PAYWALL)
-    await show_menu(msg, user_id)
+    await finish_onboarding(msg, state, place)
 
 
 # ─── Paywall ──────────────────────────────────────────────────────────
@@ -212,6 +295,7 @@ async def on_pay(cb: CallbackQuery, state: FSMContext) -> None:
             full = await ask_ai(PROMPT_FULL, "Данные:\n" + profile_text(user))
         except Exception as e:
             await cb.message.answer(f"Ошибка: {e}")
+            await show_menu(cb.message, user_id)
             return
         save_texts(user_id, full=full)
 
@@ -226,12 +310,14 @@ async def on_pay(cb: CallbackQuery, state: FSMContext) -> None:
 @router.message(StateFilter(None), F.text == BTN_CHART)
 async def m_chart(msg: Message) -> None:
     u = get_user(tid(msg))
-    if not u:
-        await msg.answer("Сначала /start")
+    if not is_profile_complete(u):
+        await msg.answer("Сначала /start — создадим карту")
         return
     if u.get("free_reading"):
         await msg.answer("🌙 Бесплатный разбор\n")
         await send_chunks(msg, u["free_reading"])
+    elif not premium(tid(msg)):
+        await msg.answer("Разбор ещё не готов. Подожди минуту или нажми /start.")
     if premium(tid(msg)) and u.get("full_reading"):
         await msg.answer("💎 Полная карта\n")
         await send_chunks(msg, u["full_reading"])
@@ -289,9 +375,6 @@ async def m_horo(msg: Message) -> None:
     await msg.answer("📅 Гороскоп:", reply_markup=KB_HORO)
 
 
-# ─── Premium: вопросы, гороскоп ───────────────────────────────────────
-
-
 @router.callback_query(F.data.startswith("q:"))
 async def cb_question(cb: CallbackQuery) -> None:
     if not premium(cb.from_user.id):
@@ -323,7 +406,9 @@ async def cb_horo(cb: CallbackQuery) -> None:
     await cb.answer()
     await cb.message.answer(f"📅 {label}…")
     try:
-        text = await ask_ai(PROMPT_ANSWER, f"Гороскоп {label.lower()}:\n\n{profile_text(u)}")
+        text = await ask_ai(
+            PROMPT_ANSWER, f"Гороскоп {label.lower()}:\n\n{profile_text(u)}"
+        )
         await send_chunks(cb.message, text)
     except Exception as e:
         await cb.message.answer(f"Ошибка: {e}")
@@ -344,9 +429,6 @@ async def on_ask_text(msg: Message, state: FSMContext) -> None:
     except Exception as e:
         await msg.answer(f"Ошибка: {e}")
     await show_menu(msg, tid(msg))
-
-
-# ─── Совместимость ────────────────────────────────────────────────────
 
 
 @router.message(Partner.name, F.text)
@@ -381,15 +463,14 @@ async def p_date(msg: Message, state: FSMContext) -> None:
     await show_menu(msg, tid(msg))
 
 
-# ─── Любой текст вне сценария ─────────────────────────────────────────
-
-
 @router.message(StateFilter(None), F.text)
 async def any_text(msg: Message) -> None:
     if msg.text.startswith("/"):
         return
     u = get_user(tid(msg))
-    if u:
-        await msg.answer("Выбери кнопку в меню 👇", reply_markup=menu_kb(premium(tid(msg))))
+    if is_profile_complete(u):
+        await msg.answer(
+            "Выбери кнопку в меню 👇", reply_markup=menu_kb(premium(tid(msg)))
+        )
     else:
         await msg.answer("Нажми /start чтобы начать ✨")
