@@ -21,18 +21,25 @@ MENU_FREE = [BTN_CHART, BTN_PREMIUM, BTN_SUPPORT]
 MENU_PREMIUM = [BTN_CHART, BTN_COMPAT, BTN_QUESTIONS, BTN_ASK, BTN_HORO, BTN_SUPPORT]
 
 
+def _btn(text: str) -> KeyboardButton:
+    return KeyboardButton(text=text)
+
+
 def menu_kb(premium: bool) -> ReplyKeyboardMarkup:
     if premium:
         return ReplyKeyboardMarkup(
             keyboard=[
-                [BTN_CHART, BTN_COMPAT],
-                [BTN_QUESTIONS, BTN_ASK],
-                [BTN_HORO, BTN_SUPPORT],
+                [_btn(BTN_CHART), _btn(BTN_COMPAT)],
+                [_btn(BTN_QUESTIONS), _btn(BTN_ASK)],
+                [_btn(BTN_HORO), _btn(BTN_SUPPORT)],
             ],
             resize_keyboard=True,
         )
     return ReplyKeyboardMarkup(
-        keyboard=[[BTN_CHART, BTN_PREMIUM], [BTN_SUPPORT]],
+        keyboard=[
+            [_btn(BTN_CHART), _btn(BTN_PREMIUM)],
+            [_btn(BTN_SUPPORT)],
+        ],
         resize_keyboard=True,
     )
 
