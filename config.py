@@ -3,15 +3,19 @@ from pathlib import Path
 
 from dotenv import load_dotenv
 
-# Явный путь + override: иначе в IDE/терминале может остаться your_openai_api_key из окружения
+# Локально читаем .env; на Railway переменные задаются в Variables (не перезаписываем их)
 _ENV_FILE = Path(__file__).resolve().parent / ".env"
-load_dotenv(_ENV_FILE, override=True)
+if _ENV_FILE.is_file():
+    load_dotenv(_ENV_FILE, override=False)
 
 
 def _require(name: str) -> str:
     value = os.getenv(name, "").strip().strip("\r")
     if not value:
-        raise RuntimeError(f"Не задана переменная окружения {name}")
+        raise RuntimeError(
+            f"Не задана переменная окружения {name}. "
+            f"Локально: файл .env. Railway: Project → Service → Variables."
+        )
     return value
 
 

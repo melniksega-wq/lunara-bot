@@ -1,5 +1,12 @@
 .env
+.env.*
+!.env.example
 __pycache__/
 .DS_Store
 charts/
+cache/
 *.sqlite
+.venv/
+venv/
+*.py[cod]
+.pytest_cache/
