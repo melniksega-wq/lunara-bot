@@ -15,7 +15,6 @@ from access import (
     has_horo_today,
     has_premium,
     horo_status_line,
-    horo_subscription_active,
 )
 from database import (
     add_custom_questions,
@@ -40,19 +39,13 @@ from keyboards import (
     BTN_QUESTIONS,
     BTN_SUPPORT,
     KB_ASK,
-    KB_HORO_MENU,
     KB_ONBOARD,
-    KB_PAYWALL_ASK,
-    KB_PAYWALL_HORO,
-    KB_PAYWALL_PREMIUM,
     KB_POPULAR,
     KB_TIME,
-    PAYWALL_ASK_TEXT,
-    PAYWALL_HORO_TEXT,
-    PAYWALL_PREMIUM_TEXT,
     POPULAR,
     menu_kb,
 )
+from paywalls import send_paywall_ask, send_paywall_horo, send_paywall_premium
 from services import (
     PROMPT_ANSWER,
     PROMPT_COMPAT,
@@ -70,7 +63,7 @@ log = logging.getLogger(__name__)
 router = Router()
 
 CHART_TIMEOUT_SEC = 45
-TEST_NOTE = "\n\n(тест: оплата подключим позже)"
+TEST_NOTE = "\n\n_Оплата в тестовом режиме — доступ открыт сразу._"
 
 WELCOME = (
     "✨ Добро пожаловать в Lunara\n\n"
@@ -118,7 +111,7 @@ async def prompt_custom_question(
     left = custom_questions_left(u)
     if left <= 0:
         await state.clear()
-        await msg.answer(PAYWALL_ASK_TEXT, reply_markup=KB_PAYWALL_ASK)
+        await send_paywall_ask(msg)
         return
     await state.set_state(Ask.waiting)
     await msg.answer(
@@ -235,7 +228,7 @@ async def finish_onboarding(msg: Message, state: FSMContext, place: str) -> None
         log.error("openai free: %s", e)
         await msg.answer(f"Не удалось получить разбор: {e}")
 
-    await msg.answer(PAYWALL_PREMIUM_TEXT, reply_markup=KB_PAYWALL_PREMIUM)
+    await send_paywall_premium(msg)
     await show_menu(msg, user_id)
 
 
@@ -355,7 +348,10 @@ async def on_pay(cb: CallbackQuery, state: FSMContext) -> None:
 
     if parts[1] == "premium":
         set_premium(user_id, True)
-        await cb.message.answer(f"💎 Premium активирован!{TEST_NOTE}")
+        await cb.message.answer(
+            f"💎 Premium активирован — полный анализ доступен в боте.{TEST_NOTE}",
+            parse_mode="Markdown",
+        )
         await deliver_full_chart(cb.message, user_id)
         await show_menu(cb.message, user_id)
         return
@@ -399,35 +395,19 @@ async def on_pay(cb: CallbackQuery, state: FSMContext) -> None:
 # ─── Гороскопы (меню) ─────────────────────────────────────────────────
 
 
-@router.callback_query(F.data.startswith("horo:"))
-async def cb_horo_menu(cb: CallbackQuery) -> None:
+@router.callback_query(F.data == "horo:deliver:today")
+async def cb_horo_deliver_today(cb: CallbackQuery) -> None:
     user_id = cb.from_user.id
     u = get_user(user_id)
     if not is_profile_complete(u):
         await cb.answer("Сначала /start", show_alert=True)
         return
-
-    kind = cb.data.split(":")[1]
+    if not has_horo_today(u):
+        await cb.answer("Сначала оплати прогноз на сегодня", show_alert=True)
+        await send_paywall_horo(cb.message)
+        return
     await cb.answer()
-
-    u = get_user(user_id)
-
-    if kind == "today":
-        if has_horo_today(u):
-            await deliver_today_horo(cb.message, user_id)
-        else:
-            await cb.message.answer(PAYWALL_HORO_TEXT, reply_markup=KB_PAYWALL_HORO)
-        return
-
-    if kind in ("week", "month") and horo_subscription_active(u) and u.get("horo_sub_kind") == kind:
-        left = int(u["horo_sub_days_total"]) - int(u["horo_days_delivered"])
-        await cb.message.answer(
-            f"📅 Подписка «{kind}» уже активна.\n"
-            f"Осталось дней: {left}. Гороскоп приходит каждый день ✨"
-        )
-        return
-
-    await cb.message.answer(PAYWALL_HORO_TEXT, reply_markup=KB_PAYWALL_HORO)
+    await deliver_today_horo(cb.message, user_id)
 
 
 # ─── Меню ─────────────────────────────────────────────────────────────
@@ -447,7 +427,7 @@ async def m_chart(msg: Message) -> None:
     if can_full_chart(u):
         await deliver_full_chart(msg, tid(msg))
     elif not has_premium(u):
-        await msg.answer(PAYWALL_PREMIUM_TEXT, reply_markup=KB_PAYWALL_PREMIUM)
+        await send_paywall_premium(msg)
 
 
 @router.message(StateFilter(None), F.text == BTN_PREMIUM)
@@ -458,7 +438,7 @@ async def m_premium(msg: Message) -> None:
         if not u.get("full_reading"):
             await deliver_full_chart(msg, tid(msg))
         return
-    await msg.answer(PAYWALL_PREMIUM_TEXT, reply_markup=KB_PAYWALL_PREMIUM)
+    await send_paywall_premium(msg)
 
 
 @router.message(StateFilter(None), F.text == BTN_SUPPORT)
@@ -473,7 +453,7 @@ async def m_support(msg: Message) -> None:
 async def m_compat(msg: Message, state: FSMContext) -> None:
     u = get_user(tid(msg))
     if not can_compat(u):
-        await msg.answer(PAYWALL_PREMIUM_TEXT, reply_markup=KB_PAYWALL_PREMIUM)
+        await send_paywall_premium(msg)
         return
     await state.set_state(Partner.name)
     await msg.answer("❤️ Совместимость\n\nИмя партнёра?")
@@ -483,7 +463,7 @@ async def m_compat(msg: Message, state: FSMContext) -> None:
 async def m_questions(msg: Message) -> None:
     u = get_user(tid(msg))
     if not can_popular(u):
-        await msg.answer(PAYWALL_PREMIUM_TEXT, reply_markup=KB_PAYWALL_PREMIUM)
+        await send_paywall_premium(msg)
         return
     await msg.answer("🔮 Популярные вопросы:", reply_markup=KB_POPULAR)
 
@@ -492,7 +472,7 @@ async def m_questions(msg: Message) -> None:
 async def m_ask(msg: Message, state: FSMContext) -> None:
     u = get_user(tid(msg))
     if not can_ask_custom(u):
-        await msg.answer(PAYWALL_ASK_TEXT, reply_markup=KB_PAYWALL_ASK)
+        await send_paywall_ask(msg)
         return
     await prompt_custom_question(msg, state, tid(msg))
 
@@ -500,12 +480,12 @@ async def m_ask(msg: Message, state: FSMContext) -> None:
 @router.message(StateFilter(None), F.text == BTN_HORO)
 async def m_horo(msg: Message) -> None:
     u = get_user(tid(msg))
-    status = horo_status_line(u)
-    header = "📅 Гороскопы\n"
-    if status:
-        header += f"\n{status}\n"
-    header += "\nВыбери период:"
-    await msg.answer(header, reply_markup=KB_HORO_MENU)
+    extra = horo_status_line(u)
+    await send_paywall_horo(
+        msg,
+        extra=extra,
+        show_today_btn=has_horo_today(u),
+    )
 
 
 @router.callback_query(F.data.startswith("q:"))
@@ -542,7 +522,7 @@ async def on_ask_text(msg: Message, state: FSMContext) -> None:
     u = get_user(user_id)
     if not can_ask_custom(u):
         await state.clear()
-        await msg.answer(PAYWALL_ASK_TEXT, reply_markup=KB_PAYWALL_ASK)
+        await send_paywall_ask(msg)
         return
     q = msg.text.strip()
     if len(q) < 3:
@@ -554,7 +534,7 @@ async def on_ask_text(msg: Message, state: FSMContext) -> None:
         text = await ask_ai(PROMPT_ANSWER, f"{q}\n\n{profile_text(u)}")
         if not use_custom_question(user_id):
             await state.clear()
-            await msg.answer(PAYWALL_ASK_TEXT, reply_markup=KB_PAYWALL_ASK)
+            await send_paywall_ask(msg)
             return
         left = custom_questions_left(get_user(user_id))
         await send_chunks(msg, text)
