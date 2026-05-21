@@ -75,12 +75,13 @@ def parse_time(text: str) -> str | None:
     return None
 
 
-def profile_text(user: dict) -> str:
+def profile_text(chart: dict) -> str:
+    name = chart.get("profile_name") or chart.get("name", "")
     return (
-        f"Имя: {user['name']}\n"
-        f"Дата: {user['birth_date']}\n"
-        f"Время: {user['birth_time']}\n"
-        f"Место: {user['birth_place']}"
+        f"Имя: {name}\n"
+        f"Дата: {chart['birth_date']}\n"
+        f"Время: {chart['birth_time']}\n"
+        f"Место: {chart['birth_place']}"
     )
 
 

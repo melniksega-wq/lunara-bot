@@ -335,6 +335,7 @@ def _render_premium_chart(
 
 def generate_natal_chart_png(
     *,
+    chart_id: int | None = None,
     telegram_id: int,
     name: str,
     birth_date: str,
@@ -364,7 +365,10 @@ def generate_natal_chart_png(
         aspects=chart_data.aspects,
     )
 
-    file_stem = f"chart_{telegram_id}_{year}{month:02d}{day:02d}_{hour:02d}{minute:02d}"
+    if chart_id is not None:
+        file_stem = f"chart_{chart_id}"
+    else:
+        file_stem = f"chart_{telegram_id}_{year}{month:02d}{day:02d}_{hour:02d}{minute:02d}"
     png_path = CHARTS_DIR / f"{file_stem}.png"
     fig.savefig(
         png_path,

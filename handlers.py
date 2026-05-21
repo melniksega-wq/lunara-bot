@@ -18,14 +18,16 @@ from access import (
 )
 from database import (
     add_custom_questions,
+    create_chart,
+    get_active_chart,
     get_user,
     grant_horo_subscription,
     grant_horo_today,
     is_profile_complete,
-    save_progress,
-    save_texts,
+    list_charts,
+    save_chart_texts,
+    set_active_chart,
     set_premium,
-    upsert_user,
     use_custom_question,
 )
 from horo_scheduler import send_daily_horo
@@ -35,6 +37,8 @@ from keyboards import (
     BTN_CHART,
     BTN_COMPAT,
     BTN_HORO,
+    BTN_MY_CHARTS,
+    BTN_NEW_CHART,
     BTN_PREMIUM,
     BTN_QUESTIONS,
     BTN_SUPPORT,
@@ -43,6 +47,7 @@ from keyboards import (
     KB_POPULAR,
     KB_TIME,
     POPULAR,
+    charts_list_kb,
     menu_kb,
 )
 from paywalls import send_paywall_ask, send_paywall_horo, send_paywall_premium
@@ -69,6 +74,11 @@ WELCOME = (
     "✨ Добро пожаловать в Lunara\n\n"
     "Создам твою натальную карту и расскажу про тебя, любовь и деньги.\n\n"
     "Шаг 1 из 4 — как тебя зовут?"
+)
+
+WELCOME_NEW = (
+    "➕ Новая натальная карта\n\n"
+    "Шаг 1 из 4 — имя для этой карты (как подписать профиль)?"
 )
 
 STEPS = (
@@ -122,43 +132,46 @@ async def prompt_custom_question(
 
 
 async def deliver_full_chart(msg: Message, user_id: int) -> None:
-    user = get_user(user_id)
-    if not user:
+    chart = get_active_chart(user_id)
+    if not chart:
+        await msg.answer("Сначала выбери или создай карту в 🌙 Мои карты")
         return
-    if user.get("full_reading"):
-        await msg.answer("💎 Полная натальная карта\n")
-        await send_chunks(msg, user["full_reading"])
+    if chart.get("full_reading"):
+        await msg.answer(f"💎 Полная карта · {chart['profile_name']}\n")
+        await send_chunks(msg, chart["full_reading"])
         return
     await msg.answer("Создаю полную карту…")
     try:
-        full = await ask_ai(PROMPT_FULL, "Данные:\n" + profile_text(user))
-        save_texts(user_id, full=full)
-        await msg.answer("💎 Полная натальная карта\n")
+        full = await ask_ai(PROMPT_FULL, "Данные:\n" + profile_text(chart))
+        save_chart_texts(chart["id"], full=full)
+        await msg.answer(f"💎 Полная карта · {chart['profile_name']}\n")
         await send_chunks(msg, full)
     except Exception as e:
         await msg.answer(f"Ошибка: {e}")
 
 
 async def deliver_today_horo(msg: Message, user_id: int) -> None:
-    user = get_user(user_id)
-    await msg.answer("📅 Гороскоп на сегодня…")
+    chart = get_active_chart(user_id)
+    if not chart:
+        await msg.answer("Сначала выбери активную карту в 🌙 Мои карты")
+        return
+    await msg.answer(f"📅 Прогноз на сегодня · {chart['profile_name']}…")
     try:
         text = await ask_ai(
             PROMPT_HORO_TODAY,
-            f"Сегодня\n\n{profile_text(user)}",
+            f"Сегодня\n\n{profile_text(chart)}",
         )
         await send_chunks(msg, text)
     except Exception as e:
         await msg.answer(f"Ошибка: {e}")
 
 
-def onboarding_data(data: dict, user_id: int) -> dict | None:
-    db = get_user(user_id) or {}
+def onboarding_data(data: dict) -> dict | None:
     merged = {
-        "name": data.get("name") or db.get("name"),
-        "birth_date": data.get("birth_date") or db.get("birth_date"),
-        "birth_time": data.get("birth_time") or db.get("birth_time"),
-        "birth_place": data.get("birth_place") or db.get("birth_place"),
+        "name": data.get("name"),
+        "birth_date": data.get("birth_date"),
+        "birth_time": data.get("birth_time"),
+        "birth_place": data.get("birth_place"),
     }
     if not all(merged.values()):
         return None
@@ -169,7 +182,7 @@ async def finish_onboarding(msg: Message, state: FSMContext, place: str) -> None
     user_id = tid(msg)
     data = await state.get_data()
     data["birth_place"] = place
-    profile = onboarding_data(data, user_id)
+    profile = onboarding_data(data)
     if not profile:
         await state.set_state(Onboarding.name)
         await msg.answer(
@@ -178,18 +191,18 @@ async def finish_onboarding(msg: Message, state: FSMContext, place: str) -> None
         )
         return
 
-    upsert_user(
+    chart = create_chart(
         user_id,
         profile["name"],
         profile["birth_date"],
         profile["birth_time"],
         place,
     )
-    user = get_user(user_id)
     await state.clear()
 
     await msg.answer(
-        "✨ Приняла! Считаю карту и готовлю разбор — это 1–2 минуты.",
+        f"✨ Карта «{chart['profile_name']}» создана!\n"
+        "Считаю положение планет — 1–2 минуты.",
         reply_markup=menu_for(user_id),
     )
 
@@ -201,29 +214,33 @@ async def finish_onboarding(msg: Message, state: FSMContext, place: str) -> None
         path = await asyncio.wait_for(
             asyncio.to_thread(
                 generate_natal_chart_png,
+                chart_id=chart["id"],
                 telegram_id=user_id,
-                name=user["name"],
-                birth_date=user["birth_date"],
-                birth_time=user["birth_time"],
+                name=chart["profile_name"],
+                birth_date=chart["birth_date"],
+                birth_time=chart["birth_time"],
                 birth_place=place,
             ),
             timeout=CHART_TIMEOUT_SEC,
         )
-        await msg.answer_photo(FSInputFile(path), caption="✨ Твоя натальная карта")
+        await msg.answer_photo(
+            FSInputFile(path),
+            caption=f"✨ {chart['profile_name']}",
+        )
     except asyncio.TimeoutError:
-        log.warning("chart timeout user=%s", user_id)
+        log.warning("chart timeout user=%s chart=%s", user_id, chart["id"])
         await msg.answer("Карта долго строилась — продолжаю с текстовым разбором.")
     except Exception as e:
         log.warning("chart: %s", e)
         await msg.answer("Карту не удалось построить — даю текстовый разбор.")
 
     try:
-        free = await ask_ai(PROMPT_FREE, "Данные:\n" + profile_text(user))
-        save_texts(user_id, free=free)
+        free = await ask_ai(PROMPT_FREE, "Данные:\n" + profile_text(chart))
+        save_chart_texts(chart["id"], free=free)
         await msg.answer("🎁 Бесплатный разбор\n")
         await send_chunks(msg, free)
     except asyncio.TimeoutError:
-        await msg.answer("Разбор занял слишком долго. Нажми 🌙 Моя карта позже.")
+        await msg.answer("Разбор занял слишком долго. Открой 🌙 Моя карта позже.")
     except Exception as e:
         log.error("openai free: %s", e)
         await msg.answer(f"Не удалось получить разбор: {e}")
@@ -238,11 +255,13 @@ async def finish_onboarding(msg: Message, state: FSMContext, place: str) -> None
 @router.message(CommandStart())
 async def start(msg: Message, state: FSMContext) -> None:
     await state.clear()
-    u = get_user(tid(msg))
-    if is_profile_complete(u):
+    user_id = tid(msg)
+    chart = get_active_chart(user_id)
+    if chart:
         await msg.answer(
-            f"С возвращением, {u['name']} ✨",
-            reply_markup=menu_for(tid(msg)),
+            f"С возвращением ✨\nАктивная карта: *{chart['profile_name']}*",
+            reply_markup=menu_for(user_id),
+            parse_mode="Markdown",
         )
         return
     await state.set_state(Onboarding.name)
@@ -253,8 +272,7 @@ async def start(msg: Message, state: FSMContext) -> None:
 @router.message(StateFilter(Onboarding), F.text == BTN_CANCEL)
 async def cancel(msg: Message, state: FSMContext) -> None:
     await state.clear()
-    u = get_user(tid(msg))
-    if is_profile_complete(u):
+    if is_profile_complete(tid(msg)):
         await msg.answer("Отменено.", reply_markup=menu_for(tid(msg)))
     else:
         await msg.answer(
@@ -275,7 +293,6 @@ async def on_name(msg: Message, state: FSMContext) -> None:
         await msg.answer("Напиши имя полностью 🙏")
         return
     await state.update_data(name=name)
-    save_progress(tid(msg), name=name)
     await state.set_state(Onboarding.date)
     await msg.answer("Шаг 2 из 4 — дата рождения (ДД.ММ.ГГГГ)", reply_markup=KB_ONBOARD)
 
@@ -289,7 +306,6 @@ async def on_date(msg: Message, state: FSMContext) -> None:
         await msg.answer("Формат: 15.03.1990")
         return
     await state.update_data(birth_date=d)
-    save_progress(tid(msg), birth_date=d)
     await state.set_state(Onboarding.time)
     await msg.answer("Шаг 3 из 4 — время (ЧЧ:ММ) или «Не знаю»", reply_markup=KB_TIME)
 
@@ -303,7 +319,6 @@ async def on_time(msg: Message, state: FSMContext) -> None:
         await msg.answer("ЧЧ:ММ или кнопка «Не знаю»")
         return
     await state.update_data(birth_time=t)
-    save_progress(tid(msg), birth_time=t)
     await state.set_state(Onboarding.place)
     await msg.answer(
         "Шаг 4 из 4 — место рождения (город, страна)\n"
@@ -338,10 +353,10 @@ async def on_place(msg: Message, state: FSMContext) -> None:
 @router.callback_query(F.data.startswith("pay:"))
 async def on_pay(cb: CallbackQuery, state: FSMContext) -> None:
     user_id = cb.from_user.id
-    user = get_user(user_id)
-    if not user or not is_profile_complete(user):
-        await cb.answer("Сначала /start", show_alert=True)
+    if not is_profile_complete(user_id):
+        await cb.answer("Сначала создай карту — /start", show_alert=True)
         return
+    user = get_user(user_id)
 
     parts = cb.data.split(":")
     await cb.answer()
@@ -379,15 +394,13 @@ async def on_pay(cb: CallbackQuery, state: FSMContext) -> None:
             await cb.message.answer(
                 f"📅 Подписка «Неделя» активна — 7 дней подряд!{TEST_NOTE}"
             )
-            fresh = get_user(user_id)
-            await send_daily_horo(cb.bot, fresh, 1, 7)
+            await send_daily_horo(cb.bot, user, 1, 7)
         elif kind == "month":
             grant_horo_subscription(user_id, "month", 30)
             await cb.message.answer(
                 f"📅 Подписка «Месяц» активна — 30 дней подряд!{TEST_NOTE}"
             )
-            fresh = get_user(user_id)
-            await send_daily_horo(cb.bot, fresh, 1, 30)
+            await send_daily_horo(cb.bot, user, 1, 30)
         await show_menu(cb.message, user_id)
         return
 
@@ -399,8 +412,8 @@ async def on_pay(cb: CallbackQuery, state: FSMContext) -> None:
 async def cb_horo_deliver_today(cb: CallbackQuery) -> None:
     user_id = cb.from_user.id
     u = get_user(user_id)
-    if not is_profile_complete(u):
-        await cb.answer("Сначала /start", show_alert=True)
+    if not is_profile_complete(user_id):
+        await cb.answer("Сначала создай карту", show_alert=True)
         return
     if not has_horo_today(u):
         await cb.answer("Сначала оплати прогноз на сегодня", show_alert=True)
@@ -410,33 +423,88 @@ async def cb_horo_deliver_today(cb: CallbackQuery) -> None:
     await deliver_today_horo(cb.message, user_id)
 
 
+# ─── Мои карты ────────────────────────────────────────────────────────
+
+
+@router.message(StateFilter(None), F.text == BTN_MY_CHARTS)
+async def m_my_charts(msg: Message) -> None:
+    user_id = tid(msg)
+    charts = list_charts(user_id)
+    if not charts:
+        await msg.answer(
+            "У тебя пока нет карт.\nНажми ➕ Создать новую карту или /start"
+        )
+        return
+    u = get_user(user_id)
+    active_id = u.get("active_chart_id") if u else None
+    await msg.answer(
+        "🌙 Твои натальные карты\n\n"
+        "Нажми на карту, чтобы сделать её активной ✅",
+        reply_markup=charts_list_kb(charts, active_id),
+    )
+
+
+@router.callback_query(F.data.startswith("chart:"))
+async def cb_set_chart(cb: CallbackQuery) -> None:
+    user_id = cb.from_user.id
+    try:
+        chart_id = int(cb.data.split(":")[1])
+    except (IndexError, ValueError):
+        await cb.answer()
+        return
+    if not set_active_chart(user_id, chart_id):
+        await cb.answer("Карта не найдена", show_alert=True)
+        return
+    chart = get_active_chart(user_id)
+    await cb.answer(f"Активна: {chart['profile_name']}")
+    await cb.message.answer(
+        f"✅ Активная карта: *{chart['profile_name']}*\n"
+        f"{chart['birth_date']} · {chart['birth_time']} · {chart['birth_place']}\n\n"
+        "Гороскопы, вопросы и совместимость теперь для этой карты.",
+        parse_mode="Markdown",
+        reply_markup=menu_for(user_id),
+    )
+
+
+@router.message(StateFilter(None), F.text == BTN_NEW_CHART)
+async def m_new_chart(msg: Message, state: FSMContext) -> None:
+    await state.clear()
+    await state.set_state(Onboarding.name)
+    await msg.answer(WELCOME_NEW, reply_markup=KB_ONBOARD)
+
+
 # ─── Меню ─────────────────────────────────────────────────────────────
 
 
 @router.message(StateFilter(None), F.text == BTN_CHART)
 async def m_chart(msg: Message) -> None:
-    u = get_user(tid(msg))
-    if not is_profile_complete(u):
-        await msg.answer("Сначала /start — создадим карту")
+    user_id = tid(msg)
+    chart = get_active_chart(user_id)
+    if not chart:
+        await msg.answer("Сначала создай или выбери карту в 🌙 Мои карты")
         return
-    if u.get("free_reading"):
-        await msg.answer("🌙 Бесплатный разбор\n")
-        await send_chunks(msg, u["free_reading"])
+    u = get_user(user_id)
+    await msg.answer(f"🌙 *{chart['profile_name']}* (активная)", parse_mode="Markdown")
+    if chart.get("free_reading"):
+        await msg.answer("🎁 Бесплатный разбор\n")
+        await send_chunks(msg, chart["free_reading"])
     else:
-        await msg.answer("Разбор ещё не готов. Подожди или нажми /start.")
+        await msg.answer("Бесплатный разбор ещё не готов.")
     if can_full_chart(u):
-        await deliver_full_chart(msg, tid(msg))
+        await deliver_full_chart(msg, user_id)
     elif not has_premium(u):
         await send_paywall_premium(msg)
 
 
 @router.message(StateFilter(None), F.text == BTN_PREMIUM)
 async def m_premium(msg: Message) -> None:
-    u = get_user(tid(msg))
+    user_id = tid(msg)
+    u = get_user(user_id)
     if has_premium(u):
         await msg.answer("💎 Premium уже активен ✨")
-        if not u.get("full_reading"):
-            await deliver_full_chart(msg, tid(msg))
+        chart = get_active_chart(user_id)
+        if chart and not chart.get("full_reading"):
+            await deliver_full_chart(msg, user_id)
         return
     await send_paywall_premium(msg)
 
@@ -451,17 +519,28 @@ async def m_support(msg: Message) -> None:
 
 @router.message(StateFilter(None), F.text == BTN_COMPAT)
 async def m_compat(msg: Message, state: FSMContext) -> None:
-    u = get_user(tid(msg))
+    user_id = tid(msg)
+    if not get_active_chart(user_id):
+        await msg.answer("Выбери активную карту в 🌙 Мои карты")
+        return
+    u = get_user(user_id)
     if not can_compat(u):
         await send_paywall_premium(msg)
         return
+    chart = get_active_chart(user_id)
     await state.set_state(Partner.name)
-    await msg.answer("❤️ Совместимость\n\nИмя партнёра?")
+    await msg.answer(
+        f"❤️ Совместимость · {chart['profile_name']}\n\nИмя партнёра?"
+    )
 
 
 @router.message(StateFilter(None), F.text == BTN_QUESTIONS)
 async def m_questions(msg: Message) -> None:
-    u = get_user(tid(msg))
+    user_id = tid(msg)
+    if not get_active_chart(user_id):
+        await msg.answer("Выбери активную карту в 🌙 Мои карты")
+        return
+    u = get_user(user_id)
     if not can_popular(u):
         await send_paywall_premium(msg)
         return
@@ -470,7 +549,11 @@ async def m_questions(msg: Message) -> None:
 
 @router.message(StateFilter(None), F.text == BTN_ASK)
 async def m_ask(msg: Message, state: FSMContext) -> None:
-    u = get_user(tid(msg))
+    user_id = tid(msg)
+    if not get_active_chart(user_id):
+        await msg.answer("Выбери активную карту в 🌙 Мои карты")
+        return
+    u = get_user(user_id)
     if not can_ask_custom(u):
         await send_paywall_ask(msg)
         return
@@ -479,8 +562,15 @@ async def m_ask(msg: Message, state: FSMContext) -> None:
 
 @router.message(StateFilter(None), F.text == BTN_HORO)
 async def m_horo(msg: Message) -> None:
-    u = get_user(tid(msg))
+    user_id = tid(msg)
+    if not get_active_chart(user_id):
+        await msg.answer("Сначала выбери активную карту в 🌙 Мои карты")
+        return
+    u = get_user(user_id)
+    chart = get_active_chart(user_id)
     extra = horo_status_line(u)
+    if chart:
+        extra = (f"Активная карта: {chart['profile_name']}\n" + extra).strip()
     await send_paywall_horo(
         msg,
         extra=extra,
@@ -490,7 +580,12 @@ async def m_horo(msg: Message) -> None:
 
 @router.callback_query(F.data.startswith("q:"))
 async def cb_question(cb: CallbackQuery) -> None:
-    u = get_user(cb.from_user.id)
+    user_id = cb.from_user.id
+    chart = get_active_chart(user_id)
+    if not chart:
+        await cb.answer("Выбери активную карту", show_alert=True)
+        return
+    u = get_user(user_id)
     if not can_popular(u):
         await cb.answer("Нужен Premium", show_alert=True)
         return
@@ -502,7 +597,7 @@ async def cb_question(cb: CallbackQuery) -> None:
     await cb.answer()
     await cb.message.answer(f"🔮 {q}")
     try:
-        text = await ask_ai(PROMPT_ANSWER, f"{q}\n\n{profile_text(u)}")
+        text = await ask_ai(PROMPT_ANSWER, f"{q}\n\n{profile_text(chart)}")
         await send_chunks(cb.message, text)
     except Exception as e:
         await cb.message.answer(f"Ошибка: {e}")
@@ -519,6 +614,11 @@ async def on_ask_cancel(msg: Message, state: FSMContext) -> None:
 @router.message(Ask.waiting, F.text)
 async def on_ask_text(msg: Message, state: FSMContext) -> None:
     user_id = tid(msg)
+    chart = get_active_chart(user_id)
+    if not chart:
+        await state.clear()
+        await msg.answer("Выбери активную карту в 🌙 Мои карты")
+        return
     u = get_user(user_id)
     if not can_ask_custom(u):
         await state.clear()
@@ -531,7 +631,7 @@ async def on_ask_text(msg: Message, state: FSMContext) -> None:
 
     await msg.answer("✍️ Ищу ответ…")
     try:
-        text = await ask_ai(PROMPT_ANSWER, f"{q}\n\n{profile_text(u)}")
+        text = await ask_ai(PROMPT_ANSWER, f"{q}\n\n{profile_text(chart)}")
         if not use_custom_question(user_id):
             await state.clear()
             await send_paywall_ask(msg)
@@ -571,13 +671,19 @@ async def p_date(msg: Message, state: FSMContext) -> None:
         await msg.answer("Формат ДД.ММ.ГГГГ")
         return
     data = await state.get_data()
-    u = get_user(tid(msg))
+    user_id = tid(msg)
+    chart = get_active_chart(user_id)
+    if not chart:
+        await state.clear()
+        await msg.answer("Нет активной карты")
+        return
     await state.clear()
     await msg.answer("❤️ Считаю совместимость…")
     try:
         text = await ask_ai(
             PROMPT_COMPAT,
-            f"Партнёр: {data['pname']}, {d}\n\nПользователь:\n{profile_text(u)}",
+            f"Партнёр: {data['pname']}, {d}\n\n"
+            f"Пользователь:\n{profile_text(chart)}",
         )
         await send_chunks(msg, text)
     except Exception as e:
@@ -589,8 +695,7 @@ async def p_date(msg: Message, state: FSMContext) -> None:
 async def any_text(msg: Message) -> None:
     if msg.text.startswith("/"):
         return
-    u = get_user(tid(msg))
-    if is_profile_complete(u):
+    if is_profile_complete(tid(msg)):
         await msg.answer("Выбери кнопку в меню 👇", reply_markup=menu_for(tid(msg)))
     else:
         await msg.answer("Нажми /start чтобы начать ✨")

@@ -13,13 +13,49 @@ def _today() -> str:
     return date.today().isoformat()
 
 
-def _table_columns(c: sqlite3.Connection) -> set[str]:
+def _users_columns(c: sqlite3.Connection) -> set[str]:
     return {r[1] for r in c.execute("PRAGMA table_info(users)")}
 
 
 def _add_column(c: sqlite3.Connection, table: str, col: str, ddl: str) -> None:
-    if col not in _table_columns(c):
+    cols = {r[1] for r in c.execute(f"PRAGMA table_info({table})")}
+    if col not in cols:
         c.execute(f"ALTER TABLE {table} ADD COLUMN {ddl}")
+
+
+def _migrate_legacy_profiles(c: sqlite3.Connection) -> None:
+    """Перенос старых профилей из users в charts."""
+    rows = c.execute(
+        """
+        SELECT telegram_id, name, birth_date, birth_time, birth_place,
+               free_reading, full_reading, created_at, registered_at
+        FROM users
+        WHERE birth_place IS NOT NULL AND birth_place != ''
+          AND name IS NOT NULL AND name != ''
+        """
+    ).fetchall()
+    for row in rows:
+        tid = row[0]
+        exists = c.execute(
+            "SELECT 1 FROM charts WHERE user_id=?", (tid,)
+        ).fetchone()
+        if exists:
+            continue
+        created = row[7] or row[8] or _now()
+        cur = c.execute(
+            """
+            INSERT INTO charts (
+                user_id, profile_name, birth_date, birth_time, birth_place,
+                free_reading, full_reading, created_at
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+            """,
+            (tid, row[1], row[2], row[3], row[4], row[5], row[6], created),
+        )
+        chart_id = cur.lastrowid
+        c.execute(
+            "UPDATE users SET active_chart_id=? WHERE telegram_id=?",
+            (chart_id, tid),
+        )
 
 
 def init_db() -> None:
@@ -29,13 +65,8 @@ def init_db() -> None:
             """
             CREATE TABLE IF NOT EXISTS users (
                 telegram_id INTEGER PRIMARY KEY,
-                name TEXT NOT NULL DEFAULT '',
-                birth_date TEXT NOT NULL DEFAULT '',
-                birth_time TEXT NOT NULL DEFAULT '',
-                birth_place TEXT NOT NULL DEFAULT '',
+                active_chart_id INTEGER,
                 is_premium INTEGER NOT NULL DEFAULT 0,
-                free_reading TEXT,
-                full_reading TEXT,
                 custom_questions_left INTEGER NOT NULL DEFAULT 0,
                 horo_today_date TEXT NOT NULL DEFAULT '',
                 horo_sub_kind TEXT NOT NULL DEFAULT '',
@@ -47,14 +78,29 @@ def init_db() -> None:
             )
             """
         )
-        migrations = (
-            ("name", "name TEXT NOT NULL DEFAULT ''"),
-            ("birth_date", "birth_date TEXT NOT NULL DEFAULT ''"),
-            ("birth_time", "birth_time TEXT NOT NULL DEFAULT ''"),
-            ("birth_place", "birth_place TEXT NOT NULL DEFAULT ''"),
+        c.execute(
+            """
+            CREATE TABLE IF NOT EXISTS charts (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                user_id INTEGER NOT NULL,
+                profile_name TEXT NOT NULL,
+                birth_date TEXT NOT NULL,
+                birth_time TEXT NOT NULL,
+                birth_place TEXT NOT NULL,
+                free_reading TEXT,
+                full_reading TEXT,
+                created_at TEXT NOT NULL,
+                FOREIGN KEY (user_id) REFERENCES users(telegram_id)
+            )
+            """
+        )
+        c.execute(
+            "CREATE INDEX IF NOT EXISTS idx_charts_user ON charts(user_id)"
+        )
+
+        for col, ddl in (
+            ("active_chart_id", "active_chart_id INTEGER"),
             ("is_premium", "is_premium INTEGER NOT NULL DEFAULT 0"),
-            ("free_reading", "free_reading TEXT"),
-            ("full_reading", "full_reading TEXT"),
             ("custom_questions_left", "custom_questions_left INTEGER NOT NULL DEFAULT 0"),
             ("horo_today_date", "horo_today_date TEXT NOT NULL DEFAULT ''"),
             ("horo_sub_kind", "horo_sub_kind TEXT NOT NULL DEFAULT ''"),
@@ -63,11 +109,19 @@ def init_db() -> None:
             ("horo_last_sent_date", "horo_last_sent_date TEXT NOT NULL DEFAULT ''"),
             ("created_at", "created_at TEXT NOT NULL DEFAULT ''"),
             ("registered_at", "registered_at TEXT NOT NULL DEFAULT ''"),
-        )
-        for col, ddl in migrations:
+            # legacy — для миграции
+            ("name", "name TEXT NOT NULL DEFAULT ''"),
+            ("birth_date", "birth_date TEXT NOT NULL DEFAULT ''"),
+            ("birth_time", "birth_time TEXT NOT NULL DEFAULT ''"),
+            ("birth_place", "birth_place TEXT NOT NULL DEFAULT ''"),
+            ("free_reading", "free_reading TEXT"),
+            ("full_reading", "full_reading TEXT"),
+        ):
             _add_column(c, "users", col, ddl)
 
-        cols = _table_columns(c)
+        _migrate_legacy_profiles(c)
+
+        cols = _users_columns(c)
         if "created_at" in cols:
             c.execute(
                 "UPDATE users SET created_at = ? "
@@ -80,117 +134,30 @@ def init_db() -> None:
                 "WHERE registered_at IS NULL OR registered_at = ''",
                 (now,),
             )
-        if "created_at" in cols and "registered_at" in cols:
-            c.execute(
-                """
-                UPDATE users SET created_at = registered_at
-                WHERE (created_at IS NULL OR created_at = '')
-                  AND registered_at IS NOT NULL AND registered_at != ''
-                """
-            )
-            c.execute(
-                """
-                UPDATE users SET registered_at = created_at
-                WHERE (registered_at IS NULL OR registered_at = '')
-                  AND created_at IS NOT NULL AND created_at != ''
-                """
-            )
         c.commit()
 
 
-def _stamp_fields(cols: set[str], now: str) -> dict[str, str]:
-    stamps: dict[str, str] = {}
-    if "created_at" in cols:
-        stamps["created_at"] = now
-    if "registered_at" in cols:
-        stamps["registered_at"] = now
-    return stamps
-
-
-def is_profile_complete(u: dict | None) -> bool:
-    if not u:
-        return False
-    return bool(
-        u.get("name")
-        and u.get("birth_date")
-        and u.get("birth_time")
-        and u.get("birth_place")
-    )
-
-
-def save_progress(
-    tid: int,
-    *,
-    name: str | None = None,
-    birth_date: str | None = None,
-    birth_time: str | None = None,
-    birth_place: str | None = None,
-) -> None:
-    fields = {
-        k: v
-        for k, v in {
-            "name": name,
-            "birth_date": birth_date,
-            "birth_time": birth_time,
-            "birth_place": birth_place,
-        }.items()
-        if v is not None
-    }
-    if not fields:
-        return
-
+def ensure_user(tid: int) -> None:
     now = _now()
     with sqlite3.connect(DB) as c:
-        cols = _table_columns(c)
-        exists = c.execute(
+        cols = _users_columns(c)
+        row = c.execute(
             "SELECT 1 FROM users WHERE telegram_id=?", (tid,)
         ).fetchone()
-        if exists:
-            sets = ", ".join(f"{k}=?" for k in fields)
-            c.execute(
-                f"UPDATE users SET {sets} WHERE telegram_id=?",
-                (*fields.values(), tid),
-            )
-        else:
-            row = {
-                "telegram_id": tid,
-                "name": fields.get("name", ""),
-                "birth_date": fields.get("birth_date", ""),
-                "birth_time": fields.get("birth_time", ""),
-                "birth_place": fields.get("birth_place", ""),
-                **_stamp_fields(cols, now),
-            }
-            keys = [k for k in row if k in cols]
-            c.execute(
-                f"INSERT INTO users ({', '.join(keys)}) VALUES ({', '.join('?' * len(keys))})",
-                [row[k] for k in keys],
-            )
-        c.commit()
-
-
-def upsert_user(tid: int, name: str, bdate: str, btime: str, bplace: str) -> None:
-    now = _now()
-    with sqlite3.connect(DB) as c:
-        cols = _table_columns(c)
-        stamps = _stamp_fields(cols, now)
-        base = {
-            "telegram_id": tid,
-            "name": name,
-            "birth_date": bdate,
-            "birth_time": btime,
-            "birth_place": bplace,
-            **stamps,
-        }
-        keys = [k for k in base if k in cols]
-        updates = ", ".join(
-            f"{k}=excluded.{k}" for k in keys if k != "telegram_id" and k not in stamps
-        )
+        if row:
+            return
+        stamps: dict = {"telegram_id": tid}
+        for leg in ("name", "birth_date", "birth_time", "birth_place"):
+            if leg in cols:
+                stamps[leg] = ""
+        if "created_at" in cols:
+            stamps["created_at"] = now
+        if "registered_at" in cols:
+            stamps["registered_at"] = now
+        keys = list(stamps.keys())
         c.execute(
-            f"""
-            INSERT INTO users ({', '.join(keys)}) VALUES ({', '.join('?' * len(keys))})
-            ON CONFLICT(telegram_id) DO UPDATE SET {updates}
-            """,
-            [base[k] for k in keys],
+            f"INSERT INTO users ({', '.join(keys)}) VALUES ({', '.join('?' * len(keys))})",
+            [stamps[k] for k in keys],
         )
         c.commit()
 
@@ -202,7 +169,113 @@ def get_user(tid: int) -> dict | None:
     return dict(row) if row else None
 
 
+def list_charts(tid: int) -> list[dict]:
+    with sqlite3.connect(DB) as c:
+        c.row_factory = sqlite3.Row
+        rows = c.execute(
+            "SELECT * FROM charts WHERE user_id=? ORDER BY id DESC",
+            (tid,),
+        ).fetchall()
+    return [dict(r) for r in rows]
+
+
+def get_chart(chart_id: int, tid: int | None = None) -> dict | None:
+    with sqlite3.connect(DB) as c:
+        c.row_factory = sqlite3.Row
+        if tid is not None:
+            row = c.execute(
+                "SELECT * FROM charts WHERE id=? AND user_id=?",
+                (chart_id, tid),
+            ).fetchone()
+        else:
+            row = c.execute("SELECT * FROM charts WHERE id=?", (chart_id,)).fetchone()
+    return dict(row) if row else None
+
+
+def get_active_chart(tid: int) -> dict | None:
+    u = get_user(tid)
+    if not u or not u.get("active_chart_id"):
+        return None
+    return get_chart(int(u["active_chart_id"]), tid)
+
+
+def set_active_chart(tid: int, chart_id: int) -> bool:
+    chart = get_chart(chart_id, tid)
+    if not chart:
+        return False
+    with sqlite3.connect(DB) as c:
+        c.execute(
+            "UPDATE users SET active_chart_id=? WHERE telegram_id=?",
+            (chart_id, tid),
+        )
+        c.commit()
+    return True
+
+
+def has_any_chart(tid: int) -> bool:
+    with sqlite3.connect(DB) as c:
+        row = c.execute(
+            "SELECT 1 FROM charts WHERE user_id=? LIMIT 1", (tid,)
+        ).fetchone()
+    return bool(row)
+
+
+def is_profile_complete(tid: int) -> bool:
+    return get_active_chart(tid) is not None
+
+
+def create_chart(
+    tid: int,
+    profile_name: str,
+    birth_date: str,
+    birth_time: str,
+    birth_place: str,
+) -> dict:
+    ensure_user(tid)
+    now = _now()
+    with sqlite3.connect(DB) as c:
+        cur = c.execute(
+            """
+            INSERT INTO charts (
+                user_id, profile_name, birth_date, birth_time, birth_place, created_at
+            ) VALUES (?, ?, ?, ?, ?, ?)
+            """,
+            (tid, profile_name, birth_date, birth_time, birth_place, now),
+        )
+        chart_id = cur.lastrowid
+        c.execute(
+            "UPDATE users SET active_chart_id=? WHERE telegram_id=?",
+            (chart_id, tid),
+        )
+        c.commit()
+    chart = get_chart(chart_id, tid)
+    assert chart is not None
+    return chart
+
+
+def save_chart_texts(
+    chart_id: int,
+    *,
+    free: str | None = None,
+    full: str | None = None,
+) -> None:
+    with sqlite3.connect(DB) as c:
+        if free is not None:
+            c.execute(
+                "UPDATE charts SET free_reading=? WHERE id=?", (free, chart_id)
+            )
+        if full is not None:
+            c.execute(
+                "UPDATE charts SET full_reading=? WHERE id=?", (full, chart_id)
+            )
+        c.commit()
+
+
+# ─── Аккаунт: premium, вопросы, гороскопы (на telegram_id) ─────────────
+
+
 def set_premium(tid: int, on: bool = True) -> None:
+    ensure_user(tid)
     with sqlite3.connect(DB) as c:
         c.execute(
             "UPDATE users SET is_premium=? WHERE telegram_id=?",
@@ -212,6 +285,7 @@ def set_premium(tid: int, on: bool = True) -> None:
 
 
 def add_custom_questions(tid: int, count: int) -> None:
+    ensure_user(tid)
     with sqlite3.connect(DB) as c:
         c.execute(
             """
@@ -242,6 +316,7 @@ def use_custom_question(tid: int) -> bool:
 
 
 def grant_horo_today(tid: int) -> None:
+    ensure_user(tid)
     with sqlite3.connect(DB) as c:
         c.execute(
             "UPDATE users SET horo_today_date=? WHERE telegram_id=?",
@@ -251,6 +326,7 @@ def grant_horo_today(tid: int) -> None:
 
 
 def grant_horo_subscription(tid: int, kind: str, days: int) -> None:
+    ensure_user(tid)
     with sqlite3.connect(DB) as c:
         c.execute(
             """
@@ -291,16 +367,3 @@ def get_horo_subscribers() -> list[dict]:
             """
         ).fetchall()
     return [dict(r) for r in rows]
-
-
-def save_texts(tid: int, free: str | None = None, full: str | None = None) -> None:
-    with sqlite3.connect(DB) as c:
-        if free is not None:
-            c.execute(
-                "UPDATE users SET free_reading=? WHERE telegram_id=?", (free, tid)
-            )
-        if full is not None:
-            c.execute(
-                "UPDATE users SET full_reading=? WHERE telegram_id=?", (full, tid)
-            )
-        c.commit()

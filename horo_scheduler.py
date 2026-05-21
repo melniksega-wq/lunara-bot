@@ -4,7 +4,7 @@ from datetime import date
 
 from aiogram import Bot
 
-from database import get_horo_subscribers, get_user, record_horo_delivery
+from database import get_active_chart, get_horo_subscribers, record_horo_delivery
 from services import PROMPT_HORO_DAILY, ask_ai, profile_text
 
 log = logging.getLogger(__name__)
@@ -16,6 +16,10 @@ def _today() -> str:
 
 async def send_daily_horo(bot: Bot, user: dict, day_num: int, total: int) -> None:
     tid = user["telegram_id"]
+    chart = get_active_chart(tid)
+    if not chart:
+        log.warning("horo skip %s: no active chart", tid)
+        return
     kind = user.get("horo_sub_kind") or "подписка"
     label = "неделя" if kind == "week" else "месяц"
     try:
@@ -23,7 +27,7 @@ async def send_daily_horo(bot: Bot, user: dict, day_num: int, total: int) -> Non
             PROMPT_HORO_DAILY,
             (
                 f"Подписка: {label}, день {day_num} из {total}.\n"
-                f"Дата: {_today()}\n\n{profile_text(user)}"
+                f"Дата: {_today()}\n\n{profile_text(chart)}"
             ),
         )
         await bot.send_message(
@@ -44,8 +48,7 @@ async def deliver_due_horoscopes(bot: Bot) -> None:
         delivered = int(user["horo_days_delivered"])
         if delivered >= total:
             continue
-        fresh = get_user(user["telegram_id"]) or user
-        await send_daily_horo(bot, fresh, delivered + 1, total)
+        await send_daily_horo(bot, user, delivered + 1, total)
 
 
 async def horo_scheduler_loop(bot: Bot) -> None:

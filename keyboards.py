@@ -24,6 +24,8 @@ KB_ASK = ReplyKeyboardMarkup(
 )
 
 # Меню
+BTN_MY_CHARTS = "🌙 Мои карты"
+BTN_NEW_CHART = "➕ Создать новую карту"
 BTN_CHART = "🌙 Моя карта"
 BTN_PREMIUM = "💎 Premium"
 BTN_SUPPORT = "💬 Поддержка"
@@ -38,9 +40,11 @@ def _btn(text: str) -> KeyboardButton:
 
 
 def menu_kb(is_premium: bool) -> ReplyKeyboardMarkup:
+    row_charts = [_btn(BTN_MY_CHARTS), _btn(BTN_NEW_CHART)]
     if is_premium:
         return ReplyKeyboardMarkup(
             keyboard=[
+                row_charts,
                 [_btn(BTN_CHART), _btn(BTN_COMPAT)],
                 [_btn(BTN_QUESTIONS), _btn(BTN_ASK)],
                 [_btn(BTN_HORO), _btn(BTN_SUPPORT)],
@@ -49,12 +53,31 @@ def menu_kb(is_premium: bool) -> ReplyKeyboardMarkup:
         )
     return ReplyKeyboardMarkup(
         keyboard=[
+            row_charts,
             [_btn(BTN_CHART), _btn(BTN_PREMIUM)],
             [_btn(BTN_ASK), _btn(BTN_HORO)],
             [_btn(BTN_SUPPORT)],
         ],
         resize_keyboard=True,
     )
+
+
+def charts_list_kb(charts: list[dict], active_id: int | None) -> InlineKeyboardMarkup:
+    rows = []
+    for ch in charts:
+        mark = " ✅" if ch["id"] == active_id else ""
+        label = f"{ch['profile_name']} · {ch['birth_date']}{mark}"
+        if len(label) > 64:
+            label = label[:61] + "…"
+        rows.append(
+            [
+                InlineKeyboardButton(
+                    text=label,
+                    callback_data=f"chart:{ch['id']}",
+                )
+            ]
+        )
+    return InlineKeyboardMarkup(inline_keyboard=rows)
 
 
 POPULAR = {
