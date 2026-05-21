@@ -1,0 +1,5 @@
+aiogram>=3.13.0,<4
+openai>=1.59.0
+python-dotenv>=1.0.0
+kerykeion>=5.12.0
+matplotlib>=3.8.0

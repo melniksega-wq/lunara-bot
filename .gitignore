@@ -1,0 +1,8 @@
+.env
+lunara.db
+charts/
+.venv/
+venv/
+__pycache__/
+*.py[cod]
+.pytest_cache/
