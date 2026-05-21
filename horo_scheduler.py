@@ -4,7 +4,13 @@ from datetime import date
 
 from aiogram import Bot
 
-from database import get_active_chart, get_horo_subscribers, record_horo_delivery
+from database import (
+    get_chart,
+    get_horo_subscriber_charts,
+    horo_current_day,
+    horo_period_total,
+    record_chart_horo_sent,
+)
 from services import PROMPT_HORO_DAILY, ask_ai, profile_text
 
 log = logging.getLogger(__name__)
@@ -14,14 +20,13 @@ def _today() -> str:
     return date.today().isoformat()
 
 
-async def send_daily_horo(bot: Bot, user: dict, day_num: int, total: int) -> None:
-    tid = user["telegram_id"]
-    chart = get_active_chart(tid)
-    if not chart:
-        log.warning("horo skip %s: no active chart", tid)
-        return
-    kind = user.get("horo_sub_kind") or "подписка"
+async def send_daily_horo(bot: Bot, chart: dict) -> None:
+    tid = chart["user_id"]
+    chart_id = chart["id"]
+    kind = chart.get("horoscope_type") or "подписка"
     label = "неделя" if kind == "week" else "месяц"
+    day_num = horo_current_day(chart)
+    total = horo_period_total(chart)
     try:
         text = await ask_ai(
             PROMPT_HORO_DAILY,
@@ -32,23 +37,17 @@ async def send_daily_horo(bot: Bot, user: dict, day_num: int, total: int) -> Non
         )
         await bot.send_message(
             tid,
-            f"📅 Гороскоп · день {day_num}/{total}\n\n{text}",
+            f"📅 {chart['profile_name']} · день {day_num}/{total}\n\n{text}",
         )
-        record_horo_delivery(tid)
+        record_chart_horo_sent(chart_id)
     except Exception as e:
-        log.error("horo delivery %s: %s", tid, e)
+        log.error("horo delivery chart=%s: %s", chart_id, e)
 
 
 async def deliver_due_horoscopes(bot: Bot) -> None:
-    today = _today()
-    for user in get_horo_subscribers():
-        if user.get("horo_last_sent_date") == today:
-            continue
-        total = int(user["horo_sub_days_total"])
-        delivered = int(user["horo_days_delivered"])
-        if delivered >= total:
-            continue
-        await send_daily_horo(bot, user, delivered + 1, total)
+    for chart in get_horo_subscriber_charts():
+        fresh = get_chart(chart["id"]) or chart
+        await send_daily_horo(bot, fresh)
 
 
 async def horo_scheduler_loop(bot: Bot) -> None:

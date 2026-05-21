@@ -11,24 +11,24 @@ from access import (
     can_compat,
     can_full_chart,
     can_popular,
-    custom_questions_left,
     has_horo_today,
     has_premium,
     horo_status_line,
+    question_balance,
 )
 from database import (
-    add_custom_questions,
+    add_chart_questions,
     create_chart,
     get_active_chart,
+    get_chart,
     get_user,
-    grant_horo_subscription,
-    grant_horo_today,
+    grant_chart_horo,
     is_profile_complete,
     list_charts,
     save_chart_texts,
     set_active_chart,
-    set_premium,
-    use_custom_question,
+    set_chart_premium,
+    use_chart_question,
 )
 from horo_scheduler import send_daily_horo
 from keyboards import (
@@ -106,8 +106,8 @@ def tid(msg: Message) -> int:
 
 
 def menu_for(user_id: int):
-    u = get_user(user_id)
-    return menu_kb(has_premium(u))
+    chart = get_active_chart(user_id)
+    return menu_kb(has_premium(chart))
 
 
 async def show_menu(msg: Message, user_id: int) -> None:
@@ -117,8 +117,11 @@ async def show_menu(msg: Message, user_id: int) -> None:
 async def prompt_custom_question(
     msg: Message, state: FSMContext, user_id: int
 ) -> None:
-    u = get_user(user_id)
-    left = custom_questions_left(u)
+    chart = get_active_chart(user_id)
+    if not chart:
+        await msg.answer("Выбери активную карту в 🌙 Мои карты")
+        return
+    left = question_balance(chart)
     if left <= 0:
         await state.clear()
         await send_paywall_ask(msg)
@@ -356,15 +359,19 @@ async def on_pay(cb: CallbackQuery, state: FSMContext) -> None:
     if not is_profile_complete(user_id):
         await cb.answer("Сначала создай карту — /start", show_alert=True)
         return
-    user = get_user(user_id)
+    chart = get_active_chart(user_id)
+    if not chart:
+        await cb.answer("Выбери активную карту", show_alert=True)
+        return
 
     parts = cb.data.split(":")
     await cb.answer()
+    cname = chart["profile_name"]
 
     if parts[1] == "premium":
-        set_premium(user_id, True)
+        set_chart_premium(chart["id"], True)
         await cb.message.answer(
-            f"💎 Premium активирован — полный анализ доступен в боте.{TEST_NOTE}",
+            f"💎 Premium для «{cname}» активирован.{TEST_NOTE}",
             parse_mode="Markdown",
         )
         await deliver_full_chart(cb.message, user_id)
@@ -373,12 +380,12 @@ async def on_pay(cb: CallbackQuery, state: FSMContext) -> None:
 
     if parts[1] == "ask" and len(parts) == 3:
         count = int(parts[2])
-        add_custom_questions(user_id, count)
-        u = get_user(user_id)
-        left = custom_questions_left(u)
+        add_chart_questions(chart["id"], count)
+        chart = get_chart(chart["id"], user_id)
+        left = question_balance(chart)
         await cb.message.answer(
-            f"✍️ Пакет на {count} вопросов открыт!{TEST_NOTE}\n"
-            f"Можешь задать {left} вопрос(ов)."
+            f"✍️ +{count} вопросов для «{cname}»{TEST_NOTE}\n"
+            f"Осталось: {left}"
         )
         await prompt_custom_question(cb.message, state, user_id)
         return
@@ -386,21 +393,25 @@ async def on_pay(cb: CallbackQuery, state: FSMContext) -> None:
     if parts[1] == "horo" and len(parts) == 3:
         kind = parts[2]
         if kind == "today":
-            grant_horo_today(user_id)
-            await cb.message.answer(f"📅 Гороскоп «Сегодня» открыт!{TEST_NOTE}")
+            grant_chart_horo(chart["id"], "today", 1)
+            await cb.message.answer(
+                f"📅 Прогноз «Сегодня» для «{cname}»{TEST_NOTE}"
+            )
             await deliver_today_horo(cb.message, user_id)
         elif kind == "week":
-            grant_horo_subscription(user_id, "week", 7)
+            grant_chart_horo(chart["id"], "week", 7)
+            chart = get_chart(chart["id"], user_id)
             await cb.message.answer(
-                f"📅 Подписка «Неделя» активна — 7 дней подряд!{TEST_NOTE}"
+                f"📅 «Неделя» для «{cname}» — 7 дней{TEST_NOTE}"
             )
-            await send_daily_horo(cb.bot, user, 1, 7)
+            await send_daily_horo(cb.bot, chart)
         elif kind == "month":
-            grant_horo_subscription(user_id, "month", 30)
+            grant_chart_horo(chart["id"], "month", 30)
+            chart = get_chart(chart["id"], user_id)
             await cb.message.answer(
-                f"📅 Подписка «Месяц» активна — 30 дней подряд!{TEST_NOTE}"
+                f"📅 «Месяц» для «{cname}» — 30 дней{TEST_NOTE}"
             )
-            await send_daily_horo(cb.bot, user, 1, 30)
+            await send_daily_horo(cb.bot, chart)
         await show_menu(cb.message, user_id)
         return
 
@@ -411,11 +422,11 @@ async def on_pay(cb: CallbackQuery, state: FSMContext) -> None:
 @router.callback_query(F.data == "horo:deliver:today")
 async def cb_horo_deliver_today(cb: CallbackQuery) -> None:
     user_id = cb.from_user.id
-    u = get_user(user_id)
-    if not is_profile_complete(user_id):
+    chart = get_active_chart(user_id)
+    if not chart:
         await cb.answer("Сначала создай карту", show_alert=True)
         return
-    if not has_horo_today(u):
+    if not has_horo_today(chart):
         await cb.answer("Сначала оплати прогноз на сегодня", show_alert=True)
         await send_paywall_horo(cb.message)
         return
@@ -457,10 +468,11 @@ async def cb_set_chart(cb: CallbackQuery) -> None:
         return
     chart = get_active_chart(user_id)
     await cb.answer(f"Активна: {chart['profile_name']}")
+    prem = "\n💎 Premium активен" if chart.get("premium_unlocked") else ""
     await cb.message.answer(
-        f"✅ Активная карта: *{chart['profile_name']}*\n"
+        f"✅ Активная карта: *{chart['profile_name']}*{prem}\n"
         f"{chart['birth_date']} · {chart['birth_time']} · {chart['birth_place']}\n\n"
-        "Гороскопы, вопросы и совместимость теперь для этой карты.",
+        "Гороскопы, вопросы и совместимость — для этой карты.",
         parse_mode="Markdown",
         reply_markup=menu_for(user_id),
     )
@@ -483,27 +495,32 @@ async def m_chart(msg: Message) -> None:
     if not chart:
         await msg.answer("Сначала создай или выбери карту в 🌙 Мои карты")
         return
-    u = get_user(user_id)
-    await msg.answer(f"🌙 *{chart['profile_name']}* (активная)", parse_mode="Markdown")
+    prem = " 💎" if chart.get("premium_unlocked") else ""
+    await msg.answer(
+        f"🌙 *{chart['profile_name']}* (активная){prem}",
+        parse_mode="Markdown",
+    )
     if chart.get("free_reading"):
         await msg.answer("🎁 Бесплатный разбор\n")
         await send_chunks(msg, chart["free_reading"])
     else:
         await msg.answer("Бесплатный разбор ещё не готов.")
-    if can_full_chart(u):
+    if can_full_chart(chart):
         await deliver_full_chart(msg, user_id)
-    elif not has_premium(u):
+    elif not has_premium(chart):
         await send_paywall_premium(msg)
 
 
 @router.message(StateFilter(None), F.text == BTN_PREMIUM)
 async def m_premium(msg: Message) -> None:
     user_id = tid(msg)
-    u = get_user(user_id)
-    if has_premium(u):
-        await msg.answer("💎 Premium уже активен ✨")
-        chart = get_active_chart(user_id)
-        if chart and not chart.get("full_reading"):
+    chart = get_active_chart(user_id)
+    if not chart:
+        await msg.answer("Сначала создай или выбери карту")
+        return
+    if has_premium(chart):
+        await msg.answer(f"💎 Premium для «{chart['profile_name']}» уже активен ✨")
+        if not chart.get("full_reading"):
             await deliver_full_chart(msg, user_id)
         return
     await send_paywall_premium(msg)
@@ -520,14 +537,13 @@ async def m_support(msg: Message) -> None:
 @router.message(StateFilter(None), F.text == BTN_COMPAT)
 async def m_compat(msg: Message, state: FSMContext) -> None:
     user_id = tid(msg)
-    if not get_active_chart(user_id):
+    chart = get_active_chart(user_id)
+    if not chart:
         await msg.answer("Выбери активную карту в 🌙 Мои карты")
         return
-    u = get_user(user_id)
-    if not can_compat(u):
+    if not can_compat(chart):
         await send_paywall_premium(msg)
         return
-    chart = get_active_chart(user_id)
     await state.set_state(Partner.name)
     await msg.answer(
         f"❤️ Совместимость · {chart['profile_name']}\n\nИмя партнёра?"
@@ -537,27 +553,30 @@ async def m_compat(msg: Message, state: FSMContext) -> None:
 @router.message(StateFilter(None), F.text == BTN_QUESTIONS)
 async def m_questions(msg: Message) -> None:
     user_id = tid(msg)
-    if not get_active_chart(user_id):
+    chart = get_active_chart(user_id)
+    if not chart:
         await msg.answer("Выбери активную карту в 🌙 Мои карты")
         return
-    u = get_user(user_id)
-    if not can_popular(u):
+    if not can_popular(chart):
         await send_paywall_premium(msg)
         return
-    await msg.answer("🔮 Популярные вопросы:", reply_markup=KB_POPULAR)
+    await msg.answer(
+        f"🔮 Популярные вопросы · {chart['profile_name']}:",
+        reply_markup=KB_POPULAR,
+    )
 
 
 @router.message(StateFilter(None), F.text == BTN_ASK)
 async def m_ask(msg: Message, state: FSMContext) -> None:
     user_id = tid(msg)
-    if not get_active_chart(user_id):
+    chart = get_active_chart(user_id)
+    if not chart:
         await msg.answer("Выбери активную карту в 🌙 Мои карты")
         return
-    u = get_user(user_id)
-    if not can_ask_custom(u):
+    if not can_ask_custom(chart):
         await send_paywall_ask(msg)
         return
-    await prompt_custom_question(msg, state, tid(msg))
+    await prompt_custom_question(msg, state, user_id)
 
 
 @router.message(StateFilter(None), F.text == BTN_HORO)
@@ -566,15 +585,15 @@ async def m_horo(msg: Message) -> None:
     if not get_active_chart(user_id):
         await msg.answer("Сначала выбери активную карту в 🌙 Мои карты")
         return
-    u = get_user(user_id)
     chart = get_active_chart(user_id)
-    extra = horo_status_line(u)
-    if chart:
-        extra = (f"Активная карта: {chart['profile_name']}\n" + extra).strip()
+    extra = f"Карта: {chart['profile_name']}"
+    status = horo_status_line(chart)
+    if status:
+        extra += f"\n{status}"
     await send_paywall_horo(
         msg,
         extra=extra,
-        show_today_btn=has_horo_today(u),
+        show_today_btn=has_horo_today(chart),
     )
 
 
@@ -585,9 +604,8 @@ async def cb_question(cb: CallbackQuery) -> None:
     if not chart:
         await cb.answer("Выбери активную карту", show_alert=True)
         return
-    u = get_user(user_id)
-    if not can_popular(u):
-        await cb.answer("Нужен Premium", show_alert=True)
+    if not can_popular(chart):
+        await cb.answer("Нужен Premium для этой карты", show_alert=True)
         return
     key = cb.data.split(":")[1]
     q = POPULAR.get(key)
@@ -606,7 +624,8 @@ async def cb_question(cb: CallbackQuery) -> None:
 @router.message(Ask.waiting, F.text == BTN_CANCEL)
 async def on_ask_cancel(msg: Message, state: FSMContext) -> None:
     await state.clear()
-    left = custom_questions_left(get_user(tid(msg)))
+    chart = get_active_chart(tid(msg))
+    left = question_balance(chart) if chart else 0
     note = f"\n\nНеиспользованных вопросов: {left}." if left else ""
     await msg.answer(f"Вопросы отложены.{note}", reply_markup=menu_for(tid(msg)))
 
@@ -619,8 +638,7 @@ async def on_ask_text(msg: Message, state: FSMContext) -> None:
         await state.clear()
         await msg.answer("Выбери активную карту в 🌙 Мои карты")
         return
-    u = get_user(user_id)
-    if not can_ask_custom(u):
+    if not chart or not can_ask_custom(chart):
         await state.clear()
         await send_paywall_ask(msg)
         return
@@ -632,11 +650,12 @@ async def on_ask_text(msg: Message, state: FSMContext) -> None:
     await msg.answer("✍️ Ищу ответ…")
     try:
         text = await ask_ai(PROMPT_ANSWER, f"{q}\n\n{profile_text(chart)}")
-        if not use_custom_question(user_id):
+        if not use_chart_question(chart["id"]):
             await state.clear()
             await send_paywall_ask(msg)
             return
-        left = custom_questions_left(get_user(user_id))
+        chart = get_chart(chart["id"], user_id)
+        left = question_balance(chart)
         await send_chunks(msg, text)
         if left > 0:
             await msg.answer(f"Использовано. Осталось вопросов: {left}")

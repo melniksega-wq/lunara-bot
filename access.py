@@ -1,58 +1,68 @@
-from datetime import date, datetime, timezone
-
-from database import get_user
+from datetime import date
 
 
 def _today() -> str:
     return date.today().isoformat()
 
 
-def has_premium(u: dict | None) -> bool:
-    return bool(u and u.get("is_premium"))
+def has_premium(chart: dict | None) -> bool:
+    return bool(chart and chart.get("premium_unlocked"))
 
 
-def custom_questions_left(u: dict | None) -> int:
-    if not u:
+def question_balance(chart: dict | None) -> int:
+    if not chart:
         return 0
-    return int(u.get("custom_questions_left") or 0)
+    return int(chart.get("question_balance") or 0)
 
 
-def can_ask_custom(u: dict | None) -> bool:
-    return custom_questions_left(u) > 0
+def can_ask_custom(chart: dict | None) -> bool:
+    return question_balance(chart) > 0
 
 
-def can_popular(u: dict | None) -> bool:
-    return has_premium(u)
+def can_popular(chart: dict | None) -> bool:
+    return has_premium(chart)
 
 
-def can_compat(u: dict | None) -> bool:
-    return has_premium(u)
+def can_compat(chart: dict | None) -> bool:
+    return has_premium(chart)
 
 
-def can_full_chart(u: dict | None) -> bool:
-    return has_premium(u)
+def can_full_chart(chart: dict | None) -> bool:
+    return has_premium(chart)
 
 
-def has_horo_today(u: dict | None) -> bool:
-    return bool(u and u.get("horo_today_date") == _today())
-
-
-def horo_subscription_active(u: dict | None) -> bool:
-    if not u or not u.get("horo_sub_kind"):
+def horoscope_active(chart: dict | None) -> bool:
+    if not chart:
         return False
-    total = int(u.get("horo_sub_days_total") or 0)
-    delivered = int(u.get("horo_days_delivered") or 0)
-    return delivered < total
+    until = chart.get("horoscope_until") or ""
+    if not until:
+        return False
+    return _today() <= until
 
 
-def horo_status_line(u: dict | None) -> str:
-    if not u:
+def has_horo_today(chart: dict | None) -> bool:
+    return bool(
+        chart
+        and chart.get("horoscope_type") == "today"
+        and horoscope_active(chart)
+    )
+
+
+def horo_subscription_active(chart: dict | None) -> bool:
+    return bool(
+        chart
+        and chart.get("horoscope_type") in ("week", "month")
+        and horoscope_active(chart)
+    )
+
+
+def horo_status_line(chart: dict | None) -> str:
+    if not chart:
         return ""
     parts = []
-    if has_horo_today(u):
-        parts.append("✅ Сегодня куплен")
-    if horo_subscription_active(u):
-        left = int(u["horo_sub_days_total"]) - int(u["horo_days_delivered"])
-        kind = "неделя" if u["horo_sub_kind"] == "week" else "месяц"
-        parts.append(f"✅ Подписка ({kind}): осталось {left} дн.")
+    if has_horo_today(chart):
+        parts.append("✅ Прогноз «Сегодня» активен")
+    if horo_subscription_active(chart):
+        kind = "неделя" if chart["horoscope_type"] == "week" else "месяц"
+        parts.append(f"✅ Подписка ({kind}) до {chart['horoscope_until']}")
     return "\n".join(parts) if parts else ""

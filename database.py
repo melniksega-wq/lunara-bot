@@ -1,5 +1,5 @@
 import sqlite3
-from datetime import date, datetime, timezone
+from datetime import date, datetime, timedelta, timezone
 from pathlib import Path
 
 DB = Path(__file__).resolve().parent / "lunara.db"
@@ -13,6 +13,10 @@ def _today() -> str:
     return date.today().isoformat()
 
 
+def _charts_columns(c: sqlite3.Connection) -> set[str]:
+    return {r[1] for r in c.execute("PRAGMA table_info(charts)")}
+
+
 def _users_columns(c: sqlite3.Connection) -> set[str]:
     return {r[1] for r in c.execute("PRAGMA table_info(users)")}
 
@@ -24,7 +28,8 @@ def _add_column(c: sqlite3.Connection, table: str, col: str, ddl: str) -> None:
 
 
 def _migrate_legacy_profiles(c: sqlite3.Connection) -> None:
-    """Перенос старых профилей из users в charts."""
+    if "name" not in _users_columns(c):
+        return
     rows = c.execute(
         """
         SELECT telegram_id, name, birth_date, birth_time, birth_place,
@@ -36,10 +41,7 @@ def _migrate_legacy_profiles(c: sqlite3.Connection) -> None:
     ).fetchall()
     for row in rows:
         tid = row[0]
-        exists = c.execute(
-            "SELECT 1 FROM charts WHERE user_id=?", (tid,)
-        ).fetchone()
-        if exists:
+        if c.execute("SELECT 1 FROM charts WHERE user_id=?", (tid,)).fetchone():
             continue
         created = row[7] or row[8] or _now()
         cur = c.execute(
@@ -58,6 +60,70 @@ def _migrate_legacy_profiles(c: sqlite3.Connection) -> None:
         )
 
 
+def _migrate_user_entitlements_to_charts(c: sqlite3.Connection) -> None:
+    """Перенос premium / вопросов / гороскопов с users на активную карту."""
+    ucols = _users_columns(c)
+    if "is_premium" not in ucols:
+        return
+    rows = c.execute(
+        """
+        SELECT telegram_id, active_chart_id, is_premium,
+               custom_questions_left, horo_today_date,
+               horo_sub_kind, horo_sub_days_total, horo_days_delivered,
+               horo_last_sent_date
+        FROM users
+        WHERE active_chart_id IS NOT NULL
+        """
+    ).fetchall()
+    today = _today()
+    for row in rows:
+        cid = row[1]
+        if not cid:
+            continue
+        premium = 1 if row[2] else 0
+        balance = int(row[3] or 0)
+        h_type = ""
+        h_until = ""
+        if row[4] == today:
+            h_type, h_until = "today", today
+        elif row[5] in ("week", "month"):
+            delivered = int(row[7] or 0)
+            total = int(row[6] or 0)
+            left = max(total - delivered, 0)
+            days = left + (1 if row[8] == today else 0)
+            if row[5] == "week":
+                h_type = "week"
+                days = max(days, 1)
+                h_until = (date.today() + timedelta(days=days - 1)).isoformat()
+            else:
+                h_type = "month"
+                days = max(days, 1)
+                h_until = (date.today() + timedelta(days=days - 1)).isoformat()
+        ccols = _charts_columns(c)
+        sets = []
+        vals = []
+        if "premium_unlocked" in ccols and premium:
+            sets.append("premium_unlocked=?")
+            vals.append(premium)
+        if "question_balance" in ccols and balance:
+            sets.append("question_balance=?")
+            vals.append(balance)
+        if h_type and "horoscope_type" in ccols:
+            sets.append("horoscope_type=?")
+            vals.append(h_type)
+            sets.append("horoscope_until=?")
+            vals.append(h_until)
+        if row[8] and "horo_last_sent_date" in ccols:
+            sets.append("horo_last_sent_date=?")
+            vals.append(row[8])
+        if sets:
+            vals.append(cid)
+            c.execute(
+                f"UPDATE charts SET {', '.join(sets)} WHERE id=?",
+                vals,
+            )
+
+
 def init_db() -> None:
     now = _now()
     with sqlite3.connect(DB) as c:
@@ -66,13 +132,6 @@ def init_db() -> None:
             CREATE TABLE IF NOT EXISTS users (
                 telegram_id INTEGER PRIMARY KEY,
                 active_chart_id INTEGER,
-                is_premium INTEGER NOT NULL DEFAULT 0,
-                custom_questions_left INTEGER NOT NULL DEFAULT 0,
-                horo_today_date TEXT NOT NULL DEFAULT '',
-                horo_sub_kind TEXT NOT NULL DEFAULT '',
-                horo_sub_days_total INTEGER NOT NULL DEFAULT 0,
-                horo_days_delivered INTEGER NOT NULL DEFAULT 0,
-                horo_last_sent_date TEXT NOT NULL DEFAULT '',
                 created_at TEXT NOT NULL DEFAULT '',
                 registered_at TEXT NOT NULL DEFAULT ''
             )
@@ -89,6 +148,11 @@ def init_db() -> None:
                 birth_place TEXT NOT NULL,
                 free_reading TEXT,
                 full_reading TEXT,
+                premium_unlocked INTEGER NOT NULL DEFAULT 0,
+                question_balance INTEGER NOT NULL DEFAULT 0,
+                horoscope_until TEXT NOT NULL DEFAULT '',
+                horoscope_type TEXT NOT NULL DEFAULT '',
+                horo_last_sent_date TEXT NOT NULL DEFAULT '',
                 created_at TEXT NOT NULL,
                 FOREIGN KEY (user_id) REFERENCES users(telegram_id)
             )
@@ -100,6 +164,14 @@ def init_db() -> None:
 
         for col, ddl in (
             ("active_chart_id", "active_chart_id INTEGER"),
+            ("created_at", "created_at TEXT NOT NULL DEFAULT ''"),
+            ("registered_at", "registered_at TEXT NOT NULL DEFAULT ''"),
+            ("name", "name TEXT NOT NULL DEFAULT ''"),
+            ("birth_date", "birth_date TEXT NOT NULL DEFAULT ''"),
+            ("birth_time", "birth_time TEXT NOT NULL DEFAULT ''"),
+            ("birth_place", "birth_place TEXT NOT NULL DEFAULT ''"),
+            ("free_reading", "free_reading TEXT"),
+            ("full_reading", "full_reading TEXT"),
             ("is_premium", "is_premium INTEGER NOT NULL DEFAULT 0"),
             ("custom_questions_left", "custom_questions_left INTEGER NOT NULL DEFAULT 0"),
             ("horo_today_date", "horo_today_date TEXT NOT NULL DEFAULT ''"),
@@ -107,31 +179,27 @@ def init_db() -> None:
             ("horo_sub_days_total", "horo_sub_days_total INTEGER NOT NULL DEFAULT 0"),
             ("horo_days_delivered", "horo_days_delivered INTEGER NOT NULL DEFAULT 0"),
             ("horo_last_sent_date", "horo_last_sent_date TEXT NOT NULL DEFAULT ''"),
-            ("created_at", "created_at TEXT NOT NULL DEFAULT ''"),
-            ("registered_at", "registered_at TEXT NOT NULL DEFAULT ''"),
-            # legacy — для миграции
-            ("name", "name TEXT NOT NULL DEFAULT ''"),
-            ("birth_date", "birth_date TEXT NOT NULL DEFAULT ''"),
-            ("birth_time", "birth_time TEXT NOT NULL DEFAULT ''"),
-            ("birth_place", "birth_place TEXT NOT NULL DEFAULT ''"),
-            ("free_reading", "free_reading TEXT"),
-            ("full_reading", "full_reading TEXT"),
         ):
             _add_column(c, "users", col, ddl)
 
-        _migrate_legacy_profiles(c)
+        for col, ddl in (
+            ("premium_unlocked", "premium_unlocked INTEGER NOT NULL DEFAULT 0"),
+            ("question_balance", "question_balance INTEGER NOT NULL DEFAULT 0"),
+            ("horoscope_until", "horoscope_until TEXT NOT NULL DEFAULT ''"),
+            ("horoscope_type", "horoscope_type TEXT NOT NULL DEFAULT ''"),
+            ("horo_last_sent_date", "horo_last_sent_date TEXT NOT NULL DEFAULT ''"),
+            ("free_reading", "free_reading TEXT"),
+            ("full_reading", "full_reading TEXT"),
+        ):
+            _add_column(c, "charts", col, ddl)
 
-        cols = _users_columns(c)
-        if "created_at" in cols:
+        _migrate_legacy_profiles(c)
+        _migrate_user_entitlements_to_charts(c)
+
+        if "created_at" in _users_columns(c):
             c.execute(
                 "UPDATE users SET created_at = ? "
                 "WHERE created_at IS NULL OR created_at = ''",
-                (now,),
-            )
-        if "registered_at" in cols:
-            c.execute(
-                "UPDATE users SET registered_at = ? "
-                "WHERE registered_at IS NULL OR registered_at = ''",
                 (now,),
             )
         c.commit()
@@ -141,10 +209,7 @@ def ensure_user(tid: int) -> None:
     now = _now()
     with sqlite3.connect(DB) as c:
         cols = _users_columns(c)
-        row = c.execute(
-            "SELECT 1 FROM users WHERE telegram_id=?", (tid,)
-        ).fetchone()
-        if row:
+        if c.execute("SELECT 1 FROM users WHERE telegram_id=?", (tid,)).fetchone():
             return
         stamps: dict = {"telegram_id": tid}
         for leg in ("name", "birth_date", "birth_time", "birth_place"):
@@ -212,14 +277,6 @@ def set_active_chart(tid: int, chart_id: int) -> bool:
     return True
 
 
-def has_any_chart(tid: int) -> bool:
-    with sqlite3.connect(DB) as c:
-        row = c.execute(
-            "SELECT 1 FROM charts WHERE user_id=? LIMIT 1", (tid,)
-        ).fetchone()
-    return bool(row)
-
-
 def is_profile_complete(tid: int) -> bool:
     return get_active_chart(tid) is not None
 
@@ -237,8 +294,10 @@ def create_chart(
         cur = c.execute(
             """
             INSERT INTO charts (
-                user_id, profile_name, birth_date, birth_time, birth_place, created_at
-            ) VALUES (?, ?, ?, ?, ?, ?)
+                user_id, profile_name, birth_date, birth_time, birth_place,
+                premium_unlocked, question_balance, horoscope_until, horoscope_type,
+                created_at
+            ) VALUES (?, ?, ?, ?, ?, 0, 0, '', '', ?)
             """,
             (tid, profile_name, birth_date, birth_time, birth_place, now),
         )
@@ -271,99 +330,101 @@ def save_chart_texts(
         c.commit()
 
 
-# ─── Аккаунт: premium, вопросы, гороскопы (на telegram_id) ─────────────
+# ─── Доступ на уровне карты ────────────────────────────────────────────
 
 
-def set_premium(tid: int, on: bool = True) -> None:
-    ensure_user(tid)
+def set_chart_premium(chart_id: int, on: bool = True) -> None:
     with sqlite3.connect(DB) as c:
         c.execute(
-            "UPDATE users SET is_premium=? WHERE telegram_id=?",
-            (1 if on else 0, tid),
+            "UPDATE charts SET premium_unlocked=? WHERE id=?",
+            (1 if on else 0, chart_id),
         )
         c.commit()
 
 
-def add_custom_questions(tid: int, count: int) -> None:
-    ensure_user(tid)
+def add_chart_questions(chart_id: int, count: int) -> None:
     with sqlite3.connect(DB) as c:
         c.execute(
             """
-            UPDATE users SET custom_questions_left = custom_questions_left + ?
-            WHERE telegram_id=?
+            UPDATE charts SET question_balance = question_balance + ?
+            WHERE id=?
             """,
-            (count, tid),
+            (count, chart_id),
         )
         c.commit()
 
 
-def use_custom_question(tid: int) -> bool:
+def use_chart_question(chart_id: int) -> bool:
     with sqlite3.connect(DB) as c:
         row = c.execute(
-            "SELECT custom_questions_left FROM users WHERE telegram_id=?", (tid,)
+            "SELECT question_balance FROM charts WHERE id=?", (chart_id,)
         ).fetchone()
         if not row or row[0] < 1:
             return False
         c.execute(
-            """
-            UPDATE users SET custom_questions_left = custom_questions_left - 1
-            WHERE telegram_id=?
-            """,
-            (tid,),
+            "UPDATE charts SET question_balance = question_balance - 1 WHERE id=?",
+            (chart_id,),
         )
         c.commit()
     return True
 
 
-def grant_horo_today(tid: int) -> None:
-    ensure_user(tid)
-    with sqlite3.connect(DB) as c:
-        c.execute(
-            "UPDATE users SET horo_today_date=? WHERE telegram_id=?",
-            (_today(), tid),
-        )
-        c.commit()
-
-
-def grant_horo_subscription(tid: int, kind: str, days: int) -> None:
-    ensure_user(tid)
+def grant_chart_horo(chart_id: int, kind: str, days: int) -> None:
+    today = date.today()
+    until = (today + timedelta(days=days - 1)).isoformat()
     with sqlite3.connect(DB) as c:
         c.execute(
             """
-            UPDATE users SET
-                horo_sub_kind=?,
-                horo_sub_days_total=?,
-                horo_days_delivered=0,
+            UPDATE charts SET
+                horoscope_type=?,
+                horoscope_until=?,
                 horo_last_sent_date=''
-            WHERE telegram_id=?
+            WHERE id=?
             """,
-            (kind, days, tid),
+            (kind, until, chart_id),
         )
         c.commit()
 
 
-def record_horo_delivery(tid: int) -> None:
+def record_chart_horo_sent(chart_id: int) -> None:
     with sqlite3.connect(DB) as c:
         c.execute(
-            """
-            UPDATE users SET
-                horo_days_delivered = horo_days_delivered + 1,
-                horo_last_sent_date=?
-            WHERE telegram_id=?
-            """,
-            (_today(), tid),
+            "UPDATE charts SET horo_last_sent_date=? WHERE id=?",
+            (_today(), chart_id),
         )
         c.commit()
 
 
-def get_horo_subscribers() -> list[dict]:
+def get_horo_subscriber_charts() -> list[dict]:
+    today = _today()
     with sqlite3.connect(DB) as c:
         c.row_factory = sqlite3.Row
         rows = c.execute(
             """
-            SELECT * FROM users
-            WHERE horo_sub_kind != ''
-              AND horo_days_delivered < horo_sub_days_total
-            """
+            SELECT * FROM charts
+            WHERE horoscope_type IN ('week', 'month')
+              AND horoscope_until >= ?
+              AND horo_last_sent_date != ?
+            """,
+            (today, today),
         ).fetchall()
     return [dict(r) for r in rows]
+
+
+def horo_period_total(chart: dict) -> int:
+    if chart.get("horoscope_type") == "week":
+        return 7
+    if chart.get("horoscope_type") == "month":
+        return 30
+    return 1
+
+
+def horo_current_day(chart: dict) -> int:
+    until_s = chart.get("horoscope_until") or _today()
+    total = horo_period_total(chart)
+    try:
+        until = date.fromisoformat(until_s)
+        start = until - timedelta(days=total - 1)
+        return (date.today() - start).days + 1
+    except ValueError:
+        return 1

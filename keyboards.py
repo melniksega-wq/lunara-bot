@@ -65,8 +65,12 @@ def menu_kb(is_premium: bool) -> ReplyKeyboardMarkup:
 def charts_list_kb(charts: list[dict], active_id: int | None) -> InlineKeyboardMarkup:
     rows = []
     for ch in charts:
-        mark = " ✅" if ch["id"] == active_id else ""
-        label = f"{ch['profile_name']} · {ch['birth_date']}{mark}"
+        marks = ""
+        if ch["id"] == active_id:
+            marks += " ✅"
+        if ch.get("premium_unlocked"):
+            marks += " 💎"
+        label = f"{ch['profile_name']} · {ch['birth_date']}{marks}"
         if len(label) > 64:
             label = label[:61] + "…"
         rows.append(
