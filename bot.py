@@ -1,8 +1,7 @@
 import os
 import sys
 
-print("Lunara: starting…", flush=True)
-
+print("Lunara bot boot", flush=True)
 os.environ.setdefault("MPLCONFIGDIR", "/tmp/matplotlib")
 os.makedirs(os.environ["MPLCONFIGDIR"], exist_ok=True)
 
@@ -19,58 +18,37 @@ from database import init_db
 from handlers import router
 
 
-class _HealthHandler(BaseHTTPRequestHandler):
-    def do_GET(self) -> None:
+class Health(BaseHTTPRequestHandler):
+    def do_GET(self):
         self.send_response(200)
         self.end_headers()
         self.wfile.write(b"ok")
 
-    def log_message(self, format: str, *args) -> None:  # noqa: A003
+    def log_message(self, *args):
         pass
 
 
-def _start_health_server() -> None:
-    port = int(os.getenv("PORT", "8080"))
-    server = HTTPServer(("0.0.0.0", port), _HealthHandler)
-    thread = threading.Thread(target=server.serve_forever, daemon=True)
-    thread.start()
-    logging.info("Health server on port %s", port)
+def run_health():
+    port = int(os.getenv("PORT", 8080))
+    HTTPServer(("0.0.0.0", port), Health).serve_forever()
 
 
-def _check_env() -> None:
-    missing = []
-    if not BOT_TOKEN:
-        missing.append("BOT_TOKEN")
-    if not OPENAI_API_KEY:
-        missing.append("OPENAI_API_KEY")
-    if missing:
-        logging.error(
-            "Не заданы переменные: %s. "
-            "Railway → ваш сервис → Variables → добавьте ключи → Redeploy.",
-            ", ".join(missing),
-        )
-        sys.exit(1)
-    logging.info("Env OK (BOT_TOKEN and OPENAI_API_KEY заданы)")
-
-
-async def main() -> None:
+async def main():
     logging.basicConfig(
         level=logging.INFO,
-        format="%(asctime)s %(levelname)s %(name)s %(message)s",
+        format="%(asctime)s %(levelname)s %(message)s",
     )
-    _check_env()
+    if not BOT_TOKEN or not OPENAI_API_KEY:
+        logging.error("Задай BOT_TOKEN и OPENAI_API_KEY в Railway Variables")
+        sys.exit(1)
+    logging.info("Keys OK. Polling…")
     init_db()
-    _start_health_server()
+    threading.Thread(target=run_health, daemon=True).start()
     bot = Bot(token=BOT_TOKEN)
     dp = Dispatcher(storage=MemoryStorage())
     dp.include_router(router)
-    logging.info("Starting Telegram polling for Lunara…")
     await dp.start_polling(bot)
 
 
 if __name__ == "__main__":
-    try:
-        asyncio.run(main())
-    except Exception:
-        logging.exception("Bot crashed")
-        raise
+    asyncio.run(main())

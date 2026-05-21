@@ -1,78 +1,79 @@
-from aiogram.types import (
-    InlineKeyboardButton,
-    InlineKeyboardMarkup,
-    KeyboardButton,
-    ReplyKeyboardMarkup,
-)
+from aiogram.types import InlineKeyboardButton, InlineKeyboardMarkup, KeyboardButton, ReplyKeyboardMarkup
 
-# --- Onboarding ---
-BTN_UNKNOWN_TIME = "Не знаю"
-
-UNKNOWN_TIME_KB = ReplyKeyboardMarkup(
-    keyboard=[[KeyboardButton(text=BTN_UNKNOWN_TIME)]],
+# Onboarding
+BTN_NO_TIME = "Не знаю"
+KB_TIME = ReplyKeyboardMarkup(
+    keyboard=[[KeyboardButton(text=BTN_NO_TIME)]],
     resize_keyboard=True,
     one_time_keyboard=True,
 )
 
-# --- Reply menu (free) ---
-BTN_MY_CHART = "🌙 Моя карта"
+# Меню
+BTN_CHART = "🌙 Моя карта"
 BTN_PREMIUM = "💎 Premium"
 BTN_SUPPORT = "💬 Поддержка"
-
-# --- Reply menu (premium only) ---
 BTN_COMPAT = "❤️ Совместимость"
 BTN_QUESTIONS = "🔮 Вопросы"
 BTN_ASK = "✍️ Задать вопрос"
-BTN_HOROSCOPE = "📅 Гороскопы"
+BTN_HORO = "📅 Гороскопы"
+
+MENU_FREE = [BTN_CHART, BTN_PREMIUM, BTN_SUPPORT]
+MENU_PREMIUM = [BTN_CHART, BTN_COMPAT, BTN_QUESTIONS, BTN_ASK, BTN_HORO, BTN_SUPPORT]
 
 
-def main_menu_kb(premium: bool) -> ReplyKeyboardMarkup:
+def menu_kb(premium: bool) -> ReplyKeyboardMarkup:
     if premium:
-        rows = [
-            [BTN_MY_CHART, BTN_COMPAT],
-            [BTN_QUESTIONS, BTN_ASK],
-            [BTN_HOROSCOPE, BTN_SUPPORT],
-        ]
-    else:
-        rows = [
-            [BTN_MY_CHART, BTN_PREMIUM],
-            [BTN_SUPPORT],
-        ]
-    return ReplyKeyboardMarkup(keyboard=rows, resize_keyboard=True)
+        return ReplyKeyboardMarkup(
+            keyboard=[
+                [BTN_CHART, BTN_COMPAT],
+                [BTN_QUESTIONS, BTN_ASK],
+                [BTN_HORO, BTN_SUPPORT],
+            ],
+            resize_keyboard=True,
+        )
+    return ReplyKeyboardMarkup(
+        keyboard=[[BTN_CHART, BTN_PREMIUM], [BTN_SUPPORT]],
+        resize_keyboard=True,
+    )
 
 
-# --- Paywall ---
-BTN_UNLOCK_PREMIUM = "💎 Открыть полную карту — 249 ₽"
+PAYWALL_TEXT = (
+    "🔒 Полная версия натальной карты скрыта\n\n"
+    "В полной версии:\n"
+    "• отношения\n"
+    "• предназначение\n"
+    "• деньги\n"
+    "• жизненные сценарии\n"
+    "• скрытые таланты"
+)
 
-PAYWALL_KB = InlineKeyboardMarkup(
+KB_PAYWALL = InlineKeyboardMarkup(
     inline_keyboard=[
-        [InlineKeyboardButton(text=BTN_UNLOCK_PREMIUM, callback_data="pay:unlock")],
+        [InlineKeyboardButton(text="💎 Открыть полную карту — 249 ₽", callback_data="pay")]
     ]
 )
 
-# --- Популярные вопросы (premium) ---
-POPULAR_QUESTIONS: dict[str, str] = {
-    "love_luck": "Почему мне не везет в любви?",
+POPULAR = {
+    "love": "Почему мне не везет в любви?",
     "talent": "В чем мой талант?",
     "burnout": "Почему я выгораю?",
     "money": "Где мои деньги?",
     "people": "Почему мне сложно с людьми?",
 }
 
-POPULAR_QUESTIONS_KB = InlineKeyboardMarkup(
+KB_POPULAR = InlineKeyboardMarkup(
     inline_keyboard=[
-        [InlineKeyboardButton(text=text, callback_data=f"pop:{key}")]
-        for key, text in POPULAR_QUESTIONS.items()
+        [InlineKeyboardButton(text=t, callback_data=f"q:{k}")]
+        for k, t in POPULAR.items()
     ]
 )
 
-# --- Гороскопы (premium) ---
-HOROSCOPE_KB = InlineKeyboardMarkup(
+KB_HORO = InlineKeyboardMarkup(
     inline_keyboard=[
         [
-            InlineKeyboardButton(text="Сегодня", callback_data="horo:today"),
-            InlineKeyboardButton(text="Неделя", callback_data="horo:week"),
+            InlineKeyboardButton(text="Сегодня", callback_data="h:today"),
+            InlineKeyboardButton(text="Неделя", callback_data="h:week"),
         ],
-        [InlineKeyboardButton(text="Месяц", callback_data="horo:month")],
+        [InlineKeyboardButton(text="Месяц", callback_data="h:month")],
     ]
 )

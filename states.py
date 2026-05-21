@@ -1,14 +1,17 @@
 from aiogram.fsm.state import State, StatesGroup
 
 
-class BirthForm(StatesGroup):
+class Onboarding(StatesGroup):
     name = State()
-    birth_date = State()
-    birth_time = State()
-    birth_place = State()
-    custom_question = State()
+    date = State()
+    time = State()
+    place = State()
 
 
-class CompatibilityForm(StatesGroup):
-    partner_name = State()
-    partner_birth_date = State()
+class Partner(StatesGroup):
+    name = State()
+    date = State()
+
+
+class Ask(StatesGroup):
+    waiting = State()
