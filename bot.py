@@ -1,19 +1,20 @@
 import os
+import sys
 
-# До тяжёлых импортов: matplotlib и Railway
+print("Lunara: starting…", flush=True)
+
 os.environ.setdefault("MPLCONFIGDIR", "/tmp/matplotlib")
 os.makedirs(os.environ["MPLCONFIGDIR"], exist_ok=True)
 
 import asyncio
 import logging
-import sys
 import threading
 from http.server import BaseHTTPRequestHandler, HTTPServer
 
 from aiogram import Bot, Dispatcher
 from aiogram.fsm.storage.memory import MemoryStorage
 
-from config import BOT_TOKEN
+from config import BOT_TOKEN, OPENAI_API_KEY
 from database import init_db
 from handlers import router
 
@@ -37,17 +38,19 @@ def _start_health_server() -> None:
 
 
 def _check_env() -> None:
-    missing = [
-        name
-        for name in ("BOT_TOKEN", "OPENAI_API_KEY")
-        if not os.getenv(name, "").strip()
-    ]
+    missing = []
+    if not BOT_TOKEN:
+        missing.append("BOT_TOKEN")
+    if not OPENAI_API_KEY:
+        missing.append("OPENAI_API_KEY")
     if missing:
         logging.error(
-            "Не заданы переменные: %s. Railway → Service → Variables.",
+            "Не заданы переменные: %s. "
+            "Railway → ваш сервис → Variables → добавьте ключи → Redeploy.",
             ", ".join(missing),
         )
         sys.exit(1)
+    logging.info("Env OK (BOT_TOKEN and OPENAI_API_KEY заданы)")
 
 
 async def main() -> None:
@@ -61,7 +64,7 @@ async def main() -> None:
     bot = Bot(token=BOT_TOKEN)
     dp = Dispatcher(storage=MemoryStorage())
     dp.include_router(router)
-    logging.info("Starting Telegram polling…")
+    logging.info("Starting Telegram polling for Lunara…")
     await dp.start_polling(bot)
 
 
