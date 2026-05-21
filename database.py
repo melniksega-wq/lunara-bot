@@ -1,5 +1,5 @@
 import sqlite3
-from datetime import datetime, timezone
+from datetime import date, datetime, timezone
 from pathlib import Path
 
 DB = Path(__file__).resolve().parent / "lunara.db"
@@ -7,6 +7,10 @@ DB = Path(__file__).resolve().parent / "lunara.db"
 
 def _now() -> str:
     return datetime.now(timezone.utc).isoformat()
+
+
+def _today() -> str:
+    return date.today().isoformat()
 
 
 def _table_columns(c: sqlite3.Connection) -> set[str]:
@@ -32,12 +36,18 @@ def init_db() -> None:
                 is_premium INTEGER NOT NULL DEFAULT 0,
                 free_reading TEXT,
                 full_reading TEXT,
+                custom_questions_left INTEGER NOT NULL DEFAULT 0,
+                horo_today_date TEXT NOT NULL DEFAULT '',
+                horo_sub_kind TEXT NOT NULL DEFAULT '',
+                horo_sub_days_total INTEGER NOT NULL DEFAULT 0,
+                horo_days_delivered INTEGER NOT NULL DEFAULT 0,
+                horo_last_sent_date TEXT NOT NULL DEFAULT '',
                 created_at TEXT NOT NULL DEFAULT '',
                 registered_at TEXT NOT NULL DEFAULT ''
             )
             """
         )
-        for col, ddl in (
+        migrations = (
             ("name", "name TEXT NOT NULL DEFAULT ''"),
             ("birth_date", "birth_date TEXT NOT NULL DEFAULT ''"),
             ("birth_time", "birth_time TEXT NOT NULL DEFAULT ''"),
@@ -45,9 +55,16 @@ def init_db() -> None:
             ("is_premium", "is_premium INTEGER NOT NULL DEFAULT 0"),
             ("free_reading", "free_reading TEXT"),
             ("full_reading", "full_reading TEXT"),
+            ("custom_questions_left", "custom_questions_left INTEGER NOT NULL DEFAULT 0"),
+            ("horo_today_date", "horo_today_date TEXT NOT NULL DEFAULT ''"),
+            ("horo_sub_kind", "horo_sub_kind TEXT NOT NULL DEFAULT ''"),
+            ("horo_sub_days_total", "horo_sub_days_total INTEGER NOT NULL DEFAULT 0"),
+            ("horo_days_delivered", "horo_days_delivered INTEGER NOT NULL DEFAULT 0"),
+            ("horo_last_sent_date", "horo_last_sent_date TEXT NOT NULL DEFAULT ''"),
             ("created_at", "created_at TEXT NOT NULL DEFAULT ''"),
             ("registered_at", "registered_at TEXT NOT NULL DEFAULT ''"),
-        ):
+        )
+        for col, ddl in migrations:
             _add_column(c, "users", col, ddl)
 
         cols = _table_columns(c)
@@ -66,16 +83,14 @@ def init_db() -> None:
         if "created_at" in cols and "registered_at" in cols:
             c.execute(
                 """
-                UPDATE users SET
-                    created_at = registered_at
+                UPDATE users SET created_at = registered_at
                 WHERE (created_at IS NULL OR created_at = '')
                   AND registered_at IS NOT NULL AND registered_at != ''
                 """
             )
             c.execute(
                 """
-                UPDATE users SET
-                    registered_at = created_at
+                UPDATE users SET registered_at = created_at
                 WHERE (registered_at IS NULL OR registered_at = '')
                   AND created_at IS NOT NULL AND created_at != ''
                 """
@@ -146,10 +161,8 @@ def save_progress(
                 **_stamp_fields(cols, now),
             }
             keys = [k for k in row if k in cols]
-            placeholders = ", ".join("?" * len(keys))
-            names = ", ".join(keys)
             c.execute(
-                f"INSERT INTO users ({names}) VALUES ({placeholders})",
+                f"INSERT INTO users ({', '.join(keys)}) VALUES ({', '.join('?' * len(keys))})",
                 [row[k] for k in keys],
             )
         c.commit()
@@ -169,14 +182,12 @@ def upsert_user(tid: int, name: str, bdate: str, btime: str, bplace: str) -> Non
             **stamps,
         }
         keys = [k for k in base if k in cols]
-        placeholders = ", ".join("?" * len(keys))
-        names = ", ".join(keys)
         updates = ", ".join(
             f"{k}=excluded.{k}" for k in keys if k != "telegram_id" and k not in stamps
         )
         c.execute(
             f"""
-            INSERT INTO users ({names}) VALUES ({placeholders})
+            INSERT INTO users ({', '.join(keys)}) VALUES ({', '.join('?' * len(keys))})
             ON CONFLICT(telegram_id) DO UPDATE SET {updates}
             """,
             [base[k] for k in keys],
@@ -191,11 +202,6 @@ def get_user(tid: int) -> dict | None:
     return dict(row) if row else None
 
 
-def premium(tid: int) -> bool:
-    u = get_user(tid)
-    return bool(u and u["is_premium"])
-
-
 def set_premium(tid: int, on: bool = True) -> None:
     with sqlite3.connect(DB) as c:
         c.execute(
@@ -203,6 +209,88 @@ def set_premium(tid: int, on: bool = True) -> None:
             (1 if on else 0, tid),
         )
         c.commit()
+
+
+def add_custom_questions(tid: int, count: int) -> None:
+    with sqlite3.connect(DB) as c:
+        c.execute(
+            """
+            UPDATE users SET custom_questions_left = custom_questions_left + ?
+            WHERE telegram_id=?
+            """,
+            (count, tid),
+        )
+        c.commit()
+
+
+def use_custom_question(tid: int) -> bool:
+    with sqlite3.connect(DB) as c:
+        row = c.execute(
+            "SELECT custom_questions_left FROM users WHERE telegram_id=?", (tid,)
+        ).fetchone()
+        if not row or row[0] < 1:
+            return False
+        c.execute(
+            """
+            UPDATE users SET custom_questions_left = custom_questions_left - 1
+            WHERE telegram_id=?
+            """,
+            (tid,),
+        )
+        c.commit()
+    return True
+
+
+def grant_horo_today(tid: int) -> None:
+    with sqlite3.connect(DB) as c:
+        c.execute(
+            "UPDATE users SET horo_today_date=? WHERE telegram_id=?",
+            (_today(), tid),
+        )
+        c.commit()
+
+
+def grant_horo_subscription(tid: int, kind: str, days: int) -> None:
+    with sqlite3.connect(DB) as c:
+        c.execute(
+            """
+            UPDATE users SET
+                horo_sub_kind=?,
+                horo_sub_days_total=?,
+                horo_days_delivered=0,
+                horo_last_sent_date=''
+            WHERE telegram_id=?
+            """,
+            (kind, days, tid),
+        )
+        c.commit()
+
+
+def record_horo_delivery(tid: int) -> None:
+    with sqlite3.connect(DB) as c:
+        c.execute(
+            """
+            UPDATE users SET
+                horo_days_delivered = horo_days_delivered + 1,
+                horo_last_sent_date=?
+            WHERE telegram_id=?
+            """,
+            (_today(), tid),
+        )
+        c.commit()
+
+
+def get_horo_subscribers() -> list[dict]:
+    with sqlite3.connect(DB) as c:
+        c.row_factory = sqlite3.Row
+        rows = c.execute(
+            """
+            SELECT * FROM users
+            WHERE horo_sub_kind != ''
+              AND horo_days_delivered < horo_sub_days_total
+            """
+        ).fetchall()
+    return [dict(r) for r in rows]
 
 
 def save_texts(tid: int, free: str | None = None, full: str | None = None) -> None:

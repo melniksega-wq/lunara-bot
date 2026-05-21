@@ -27,16 +27,13 @@ BTN_QUESTIONS = "🔮 Вопросы"
 BTN_ASK = "✍️ Задать вопрос"
 BTN_HORO = "📅 Гороскопы"
 
-MENU_FREE = [BTN_CHART, BTN_PREMIUM, BTN_SUPPORT]
-MENU_PREMIUM = [BTN_CHART, BTN_COMPAT, BTN_QUESTIONS, BTN_ASK, BTN_HORO, BTN_SUPPORT]
-
 
 def _btn(text: str) -> KeyboardButton:
     return KeyboardButton(text=text)
 
 
-def menu_kb(premium: bool) -> ReplyKeyboardMarkup:
-    if premium:
+def menu_kb(is_premium: bool) -> ReplyKeyboardMarkup:
+    if is_premium:
         return ReplyKeyboardMarkup(
             keyboard=[
                 [_btn(BTN_CHART), _btn(BTN_COMPAT)],
@@ -48,25 +45,81 @@ def menu_kb(premium: bool) -> ReplyKeyboardMarkup:
     return ReplyKeyboardMarkup(
         keyboard=[
             [_btn(BTN_CHART), _btn(BTN_PREMIUM)],
+            [_btn(BTN_ASK), _btn(BTN_HORO)],
             [_btn(BTN_SUPPORT)],
         ],
         resize_keyboard=True,
     )
 
 
-PAYWALL_TEXT = (
-    "🔒 Полная версия натальной карты скрыта\n\n"
-    "В полной версии:\n"
-    "• отношения\n"
-    "• предназначение\n"
-    "• деньги\n"
-    "• жизненные сценарии\n"
-    "• скрытые таланты"
+PAYWALL_PREMIUM_TEXT = (
+    "🔒 Полная версия карты скрыта\n\n"
+    "Premium за 249 ₽ открывает:\n"
+    "• полную карту\n"
+    "• совместимость\n"
+    "• готовые вопросы"
 )
 
-KB_PAYWALL = InlineKeyboardMarkup(
+PAYWALL_ASK_TEXT = (
+    "✍️ Свой вопрос — отдельная покупка\n\n"
+    "Не входит в Premium.\n"
+    "Выбери пакет:"
+)
+
+PAYWALL_HORO_TEXT = (
+    "📅 Гороскопы — отдельная покупка\n\n"
+    "Не входит в Premium.\n"
+    "Выбери период:"
+)
+
+KB_PAYWALL_PREMIUM = InlineKeyboardMarkup(
     inline_keyboard=[
-        [InlineKeyboardButton(text="💎 Открыть полную карту — 249 ₽", callback_data="pay")]
+        [
+            InlineKeyboardButton(
+                text="💎 Premium — 249 ₽",
+                callback_data="pay:premium",
+            )
+        ]
+    ]
+)
+
+KB_PAYWALL_ASK = InlineKeyboardMarkup(
+    inline_keyboard=[
+        [
+            InlineKeyboardButton(
+                text="3 вопроса — 99 ₽",
+                callback_data="pay:ask:3",
+            )
+        ],
+        [
+            InlineKeyboardButton(
+                text="10 вопросов — 249 ₽",
+                callback_data="pay:ask:10",
+            )
+        ],
+    ]
+)
+
+KB_PAYWALL_HORO = InlineKeyboardMarkup(
+    inline_keyboard=[
+        [
+            InlineKeyboardButton(
+                text="Сегодня — 29 ₽",
+                callback_data="pay:horo:today",
+            )
+        ],
+        [
+            InlineKeyboardButton(
+                text="Неделя — 99 ₽",
+                callback_data="pay:horo:week",
+            )
+        ],
+        [
+            InlineKeyboardButton(
+                text="Месяц — 199 ₽",
+                callback_data="pay:horo:month",
+            )
+        ],
     ]
 )
 
@@ -85,12 +138,25 @@ KB_POPULAR = InlineKeyboardMarkup(
     ]
 )
 
-KB_HORO = InlineKeyboardMarkup(
+KB_HORO_MENU = InlineKeyboardMarkup(
     inline_keyboard=[
         [
-            InlineKeyboardButton(text="Сегодня", callback_data="h:today"),
-            InlineKeyboardButton(text="Неделя", callback_data="h:week"),
+            InlineKeyboardButton(
+                text="Сегодня — 29 ₽",
+                callback_data="horo:today",
+            )
         ],
-        [InlineKeyboardButton(text="Месяц", callback_data="h:month")],
+        [
+            InlineKeyboardButton(
+                text="Неделя — 99 ₽",
+                callback_data="horo:week",
+            )
+        ],
+        [
+            InlineKeyboardButton(
+                text="Месяц — 199 ₽",
+                callback_data="horo:month",
+            )
+        ],
     ]
 )

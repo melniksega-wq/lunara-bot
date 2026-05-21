@@ -6,15 +6,30 @@ from aiogram.filters import Command, CommandStart, StateFilter
 from aiogram.fsm.context import FSMContext
 from aiogram.types import CallbackQuery, FSInputFile, Message, ReplyKeyboardRemove
 
+from access import (
+    can_ask_custom,
+    can_compat,
+    can_full_chart,
+    can_popular,
+    custom_questions_left,
+    has_horo_today,
+    has_premium,
+    horo_status_line,
+    horo_subscription_active,
+)
 from database import (
+    add_custom_questions,
     get_user,
+    grant_horo_subscription,
+    grant_horo_today,
     is_profile_complete,
-    premium,
     save_progress,
     save_texts,
     set_premium,
     upsert_user,
+    use_custom_question,
 )
+from horo_scheduler import send_daily_horo
 from keyboards import (
     BTN_ASK,
     BTN_CANCEL,
@@ -24,21 +39,25 @@ from keyboards import (
     BTN_PREMIUM,
     BTN_QUESTIONS,
     BTN_SUPPORT,
-    KB_HORO,
+    KB_HORO_MENU,
     KB_ONBOARD,
-    KB_PAYWALL,
+    KB_PAYWALL_ASK,
+    KB_PAYWALL_HORO,
+    KB_PAYWALL_PREMIUM,
     KB_POPULAR,
     KB_TIME,
-    PAYWALL_TEXT,
+    PAYWALL_ASK_TEXT,
+    PAYWALL_HORO_TEXT,
+    PAYWALL_PREMIUM_TEXT,
     POPULAR,
     menu_kb,
 )
 from services import (
-    HORO_LABELS,
     PROMPT_ANSWER,
     PROMPT_COMPAT,
     PROMPT_FREE,
     PROMPT_FULL,
+    PROMPT_HORO_TODAY,
     ask_ai,
     parse_date,
     parse_time,
@@ -50,6 +69,7 @@ log = logging.getLogger(__name__)
 router = Router()
 
 CHART_TIMEOUT_SEC = 45
+TEST_NOTE = "\n\n(тест: оплата подключим позже)"
 
 WELCOME = (
     "✨ Добро пожаловать в Lunara\n\n"
@@ -81,12 +101,47 @@ def tid(msg: Message) -> int:
     return msg.from_user.id if msg.from_user else 0
 
 
+def menu_for(user_id: int):
+    u = get_user(user_id)
+    return menu_kb(has_premium(u))
+
+
 async def show_menu(msg: Message, user_id: int) -> None:
-    await msg.answer("Выбери раздел 👇", reply_markup=menu_kb(premium(user_id)))
+    await msg.answer("Выбери раздел 👇", reply_markup=menu_for(user_id))
+
+
+async def deliver_full_chart(msg: Message, user_id: int) -> None:
+    user = get_user(user_id)
+    if not user:
+        return
+    if user.get("full_reading"):
+        await msg.answer("💎 Полная натальная карта\n")
+        await send_chunks(msg, user["full_reading"])
+        return
+    await msg.answer("Создаю полную карту…")
+    try:
+        full = await ask_ai(PROMPT_FULL, "Данные:\n" + profile_text(user))
+        save_texts(user_id, full=full)
+        await msg.answer("💎 Полная натальная карта\n")
+        await send_chunks(msg, full)
+    except Exception as e:
+        await msg.answer(f"Ошибка: {e}")
+
+
+async def deliver_today_horo(msg: Message, user_id: int) -> None:
+    user = get_user(user_id)
+    await msg.answer("📅 Гороскоп на сегодня…")
+    try:
+        text = await ask_ai(
+            PROMPT_HORO_TODAY,
+            f"Сегодня\n\n{profile_text(user)}",
+        )
+        await send_chunks(msg, text)
+    except Exception as e:
+        await msg.answer(f"Ошибка: {e}")
 
 
 def onboarding_data(data: dict, user_id: int) -> dict | None:
-    """FSM + черновик в БД, если память сбросилась (Railway restart)."""
     db = get_user(user_id) or {}
     merged = {
         "name": data.get("name") or db.get("name"),
@@ -123,9 +178,8 @@ async def finish_onboarding(msg: Message, state: FSMContext, place: str) -> None
     await state.clear()
 
     await msg.answer(
-        "✨ Приняла! Считаю карту и готовлю разбор — это 1–2 минуты.\n"
-        "Меню появится внизу, когда всё будет готово 👇",
-        reply_markup=menu_kb(False),
+        "✨ Приняла! Считаю карту и готовлю разбор — это 1–2 минуты.",
+        reply_markup=menu_for(user_id),
     )
 
     await anim(msg)
@@ -152,22 +206,18 @@ async def finish_onboarding(msg: Message, state: FSMContext, place: str) -> None
         log.warning("chart: %s", e)
         await msg.answer("Карту не удалось построить — даю текстовый разбор.")
 
-    free = None
     try:
         free = await ask_ai(PROMPT_FREE, "Данные:\n" + profile_text(user))
         save_texts(user_id, free=free)
         await msg.answer("🎁 Бесплатный разбор\n")
         await send_chunks(msg, free)
     except asyncio.TimeoutError:
-        await msg.answer("Разбор занял слишком долго. Нажми 🌙 Моя карта позже или /start.")
+        await msg.answer("Разбор занял слишком долго. Нажми 🌙 Моя карта позже.")
     except Exception as e:
         log.error("openai free: %s", e)
-        await msg.answer(
-            f"Не удалось получить разбор: {e}\n"
-            "Попробуй 🌙 Моя карта позже или напиши в 💬 Поддержка."
-        )
+        await msg.answer(f"Не удалось получить разбор: {e}")
 
-    await msg.answer(PAYWALL_TEXT, reply_markup=KB_PAYWALL)
+    await msg.answer(PAYWALL_PREMIUM_TEXT, reply_markup=KB_PAYWALL_PREMIUM)
     await show_menu(msg, user_id)
 
 
@@ -181,7 +231,7 @@ async def start(msg: Message, state: FSMContext) -> None:
     if is_profile_complete(u):
         await msg.answer(
             f"С возвращением, {u['name']} ✨",
-            reply_markup=menu_kb(premium(tid(msg))),
+            reply_markup=menu_for(tid(msg)),
         )
         return
     await state.set_state(Onboarding.name)
@@ -194,7 +244,7 @@ async def cancel(msg: Message, state: FSMContext) -> None:
     await state.clear()
     u = get_user(tid(msg))
     if is_profile_complete(u):
-        await msg.answer("Отменено.", reply_markup=menu_kb(premium(tid(msg))))
+        await msg.answer("Отменено.", reply_markup=menu_for(tid(msg)))
     else:
         await msg.answer(
             "Онбординг отменён. Нажми /start чтобы начать снова ✨",
@@ -271,40 +321,97 @@ async def on_place(msg: Message, state: FSMContext) -> None:
     await finish_onboarding(msg, state, place)
 
 
-# ─── Paywall ──────────────────────────────────────────────────────────
+# ─── Оплата (тест) ────────────────────────────────────────────────────
 
 
-@router.callback_query(F.data == "pay")
-async def on_pay(cb: CallbackQuery, state: FSMContext) -> None:
+@router.callback_query(F.data.startswith("pay:"))
+async def on_pay(cb: CallbackQuery) -> None:
     user_id = cb.from_user.id
     user = get_user(user_id)
-    if not user:
+    if not user or not is_profile_complete(user):
         await cb.answer("Сначала /start", show_alert=True)
         return
+
+    parts = cb.data.split(":")
     await cb.answer()
-    set_premium(user_id, True)
-    await cb.message.answer(
-        "💎 Premium открыт!\n(тест: оплата 249 ₽ подключим позже)"
-    )
 
-    if user.get("full_reading"):
-        full = user["full_reading"]
-    else:
-        await cb.message.answer("Создаю полную карту…")
-        try:
-            full = await ask_ai(PROMPT_FULL, "Данные:\n" + profile_text(user))
-        except Exception as e:
-            await cb.message.answer(f"Ошибка: {e}")
-            await show_menu(cb.message, user_id)
-            return
-        save_texts(user_id, full=full)
+    if parts[1] == "premium":
+        set_premium(user_id, True)
+        await cb.message.answer(f"💎 Premium активирован!{TEST_NOTE}")
+        await deliver_full_chart(cb.message, user_id)
+        await show_menu(cb.message, user_id)
+        return
 
-    await cb.message.answer("💎 Полная натальная карта\n")
-    await send_chunks(cb.message, full)
-    await show_menu(cb.message, user_id)
+    if parts[1] == "ask" and len(parts) == 3:
+        count = int(parts[2])
+        add_custom_questions(user_id, count)
+        u = get_user(user_id)
+        await cb.message.answer(
+            f"✍️ Пакет на {count} вопросов открыт!{TEST_NOTE}\n"
+            f"Осталось: {custom_questions_left(u)}"
+        )
+        await show_menu(cb.message, user_id)
+        return
+
+    if parts[1] == "horo" and len(parts) == 3:
+        kind = parts[2]
+        if kind == "today":
+            grant_horo_today(user_id)
+            await cb.message.answer(f"📅 Гороскоп «Сегодня» открыт!{TEST_NOTE}")
+            await deliver_today_horo(cb.message, user_id)
+        elif kind == "week":
+            grant_horo_subscription(user_id, "week", 7)
+            await cb.message.answer(
+                f"📅 Подписка «Неделя» активна — 7 дней подряд!{TEST_NOTE}"
+            )
+            fresh = get_user(user_id)
+            await send_daily_horo(cb.bot, fresh, 1, 7)
+        elif kind == "month":
+            grant_horo_subscription(user_id, "month", 30)
+            await cb.message.answer(
+                f"📅 Подписка «Месяц» активна — 30 дней подряд!{TEST_NOTE}"
+            )
+            fresh = get_user(user_id)
+            await send_daily_horo(cb.bot, fresh, 1, 30)
+        await show_menu(cb.message, user_id)
+        return
 
 
-# ─── Меню (только вне FSM) ───────────────────────────────────────────
+# ─── Гороскопы (меню) ─────────────────────────────────────────────────
+
+
+@router.callback_query(F.data.startswith("horo:"))
+async def cb_horo_menu(cb: CallbackQuery) -> None:
+    user_id = cb.from_user.id
+    u = get_user(user_id)
+    if not is_profile_complete(u):
+        await cb.answer("Сначала /start", show_alert=True)
+        return
+
+    kind = cb.data.split(":")[1]
+    await cb.answer()
+
+    u = get_user(user_id)
+
+    if kind == "today":
+        if has_horo_today(u):
+            await deliver_today_horo(cb.message, user_id)
+        else:
+            await cb.message.answer(PAYWALL_HORO_TEXT, reply_markup=KB_PAYWALL_HORO)
+        return
+
+    if kind in ("week", "month") and horo_subscription_active(u) and u.get("horo_sub_kind") == kind:
+        left = int(u["horo_sub_days_total"]) - int(u["horo_days_delivered"])
+        await cb.message.answer(
+            f"📅 Подписка «{kind}» уже активна.\n"
+            f"Осталось дней: {left}. Гороскоп приходит каждый день ✨"
+        )
+        return
+
+    await cb.message.answer(PAYWALL_HORO_TEXT, reply_markup=KB_PAYWALL_HORO)
+
+
+# ─── Меню ─────────────────────────────────────────────────────────────
 
 
 @router.message(StateFilter(None), F.text == BTN_CHART)
@@ -316,21 +423,23 @@ async def m_chart(msg: Message) -> None:
     if u.get("free_reading"):
         await msg.answer("🌙 Бесплатный разбор\n")
         await send_chunks(msg, u["free_reading"])
-    elif not premium(tid(msg)):
-        await msg.answer("Разбор ещё не готов. Подожди минуту или нажми /start.")
-    if premium(tid(msg)) and u.get("full_reading"):
-        await msg.answer("💎 Полная карта\n")
-        await send_chunks(msg, u["full_reading"])
-    elif not premium(tid(msg)):
-        await msg.answer(PAYWALL_TEXT, reply_markup=KB_PAYWALL)
+    else:
+        await msg.answer("Разбор ещё не готов. Подожди или нажми /start.")
+    if can_full_chart(u):
+        await deliver_full_chart(msg, tid(msg))
+    elif not has_premium(u):
+        await msg.answer(PAYWALL_PREMIUM_TEXT, reply_markup=KB_PAYWALL_PREMIUM)
 
 
 @router.message(StateFilter(None), F.text == BTN_PREMIUM)
 async def m_premium(msg: Message) -> None:
-    if premium(tid(msg)):
+    u = get_user(tid(msg))
+    if has_premium(u):
         await msg.answer("💎 Premium уже активен ✨")
+        if not u.get("full_reading"):
+            await deliver_full_chart(msg, tid(msg))
         return
-    await msg.answer(PAYWALL_TEXT, reply_markup=KB_PAYWALL)
+    await msg.answer(PAYWALL_PREMIUM_TEXT, reply_markup=KB_PAYWALL_PREMIUM)
 
 
 @router.message(StateFilter(None), F.text == BTN_SUPPORT)
@@ -343,8 +452,9 @@ async def m_support(msg: Message) -> None:
 
 @router.message(StateFilter(None), F.text == BTN_COMPAT)
 async def m_compat(msg: Message, state: FSMContext) -> None:
-    if not premium(tid(msg)):
-        await msg.answer(PAYWALL_TEXT, reply_markup=KB_PAYWALL)
+    u = get_user(tid(msg))
+    if not can_compat(u):
+        await msg.answer(PAYWALL_PREMIUM_TEXT, reply_markup=KB_PAYWALL_PREMIUM)
         return
     await state.set_state(Partner.name)
     await msg.answer("❤️ Совместимость\n\nИмя партнёра?")
@@ -352,32 +462,42 @@ async def m_compat(msg: Message, state: FSMContext) -> None:
 
 @router.message(StateFilter(None), F.text == BTN_QUESTIONS)
 async def m_questions(msg: Message) -> None:
-    if not premium(tid(msg)):
-        await msg.answer(PAYWALL_TEXT, reply_markup=KB_PAYWALL)
+    u = get_user(tid(msg))
+    if not can_popular(u):
+        await msg.answer(PAYWALL_PREMIUM_TEXT, reply_markup=KB_PAYWALL_PREMIUM)
         return
     await msg.answer("🔮 Популярные вопросы:", reply_markup=KB_POPULAR)
 
 
 @router.message(StateFilter(None), F.text == BTN_ASK)
 async def m_ask(msg: Message, state: FSMContext) -> None:
-    if not premium(tid(msg)):
-        await msg.answer(PAYWALL_TEXT, reply_markup=KB_PAYWALL)
+    u = get_user(tid(msg))
+    left = custom_questions_left(u)
+    if not can_ask_custom(u):
+        await msg.answer(PAYWALL_ASK_TEXT, reply_markup=KB_PAYWALL_ASK)
         return
     await state.set_state(Ask.waiting)
-    await msg.answer("✍️ Напиши свой вопрос одним сообщением")
+    await msg.answer(
+        f"✍️ Напиши свой вопрос одним сообщением\n"
+        f"Осталось вопросов: {left}"
+    )
 
 
 @router.message(StateFilter(None), F.text == BTN_HORO)
 async def m_horo(msg: Message) -> None:
-    if not premium(tid(msg)):
-        await msg.answer(PAYWALL_TEXT, reply_markup=KB_PAYWALL)
-        return
-    await msg.answer("📅 Гороскоп:", reply_markup=KB_HORO)
+    u = get_user(tid(msg))
+    status = horo_status_line(u)
+    header = "📅 Гороскопы\n"
+    if status:
+        header += f"\n{status}\n"
+    header += "\nВыбери период:"
+    await msg.answer(header, reply_markup=KB_HORO_MENU)
 
 
 @router.callback_query(F.data.startswith("q:"))
 async def cb_question(cb: CallbackQuery) -> None:
-    if not premium(cb.from_user.id):
+    u = get_user(cb.from_user.id)
+    if not can_popular(u):
         await cb.answer("Нужен Premium", show_alert=True)
         return
     key = cb.data.split(":")[1]
@@ -385,7 +505,6 @@ async def cb_question(cb: CallbackQuery) -> None:
     if not q:
         await cb.answer()
         return
-    u = get_user(cb.from_user.id)
     await cb.answer()
     await cb.message.answer(f"🔮 {q}")
     try:
@@ -395,37 +514,28 @@ async def cb_question(cb: CallbackQuery) -> None:
         await cb.message.answer(f"Ошибка: {e}")
 
 
-@router.callback_query(F.data.startswith("h:"))
-async def cb_horo(cb: CallbackQuery) -> None:
-    if not premium(cb.from_user.id):
-        await cb.answer("Нужен Premium", show_alert=True)
-        return
-    period = cb.data.split(":")[1]
-    label = HORO_LABELS.get(period, "Прогноз")
-    u = get_user(cb.from_user.id)
-    await cb.answer()
-    await cb.message.answer(f"📅 {label}…")
-    try:
-        text = await ask_ai(
-            PROMPT_ANSWER, f"Гороскоп {label.lower()}:\n\n{profile_text(u)}"
-        )
-        await send_chunks(cb.message, text)
-    except Exception as e:
-        await cb.message.answer(f"Ошибка: {e}")
-
-
 @router.message(Ask.waiting, F.text)
 async def on_ask_text(msg: Message, state: FSMContext) -> None:
+    u = get_user(tid(msg))
+    if not can_ask_custom(u):
+        await state.clear()
+        await msg.answer(PAYWALL_ASK_TEXT, reply_markup=KB_PAYWALL_ASK)
+        return
     q = msg.text.strip()
     if len(q) < 3:
         await msg.answer("Вопрос подлиннее 🙂")
         return
     await state.clear()
-    u = get_user(tid(msg))
     await msg.answer("✍️ Ищу ответ…")
     try:
         text = await ask_ai(PROMPT_ANSWER, f"{q}\n\n{profile_text(u)}")
+        use_custom_question(tid(msg))
+        left = custom_questions_left(get_user(tid(msg)))
         await send_chunks(msg, text)
+        if left:
+            await msg.answer(f"Осталось вопросов: {left}")
+        else:
+            await msg.answer("Пакет вопросов закончился. Купи новый в ✍️ Задать вопрос.")
     except Exception as e:
         await msg.answer(f"Ошибка: {e}")
     await show_menu(msg, tid(msg))
@@ -469,8 +579,6 @@ async def any_text(msg: Message) -> None:
         return
     u = get_user(tid(msg))
     if is_profile_complete(u):
-        await msg.answer(
-            "Выбери кнопку в меню 👇", reply_markup=menu_kb(premium(tid(msg)))
-        )
+        await msg.answer("Выбери кнопку в меню 👇", reply_markup=menu_for(tid(msg)))
     else:
         await msg.answer("Нажми /start чтобы начать ✨")

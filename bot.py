@@ -16,6 +16,7 @@ from aiogram.fsm.storage.memory import MemoryStorage
 from config import BOT_TOKEN, OPENAI_API_KEY
 from database import init_db
 from handlers import router
+from horo_scheduler import horo_scheduler_loop
 
 
 class Health(BaseHTTPRequestHandler):
@@ -47,6 +48,7 @@ async def main():
     bot = Bot(token=BOT_TOKEN)
     dp = Dispatcher(storage=MemoryStorage())
     dp.include_router(router)
+    asyncio.create_task(horo_scheduler_loop(bot))
     await dp.start_polling(bot)
 
 
