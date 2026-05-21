@@ -5,13 +5,8 @@ from aiogram.types import (
     ReplyKeyboardMarkup,
 )
 
-BTN_CREATE_CARD = "✨ Создать мою карту"
+# --- Onboarding ---
 BTN_UNKNOWN_TIME = "Не знаю"
-
-MAIN_REPLY_KB = ReplyKeyboardMarkup(
-    keyboard=[[KeyboardButton(text=BTN_CREATE_CARD)]],
-    resize_keyboard=True,
-)
 
 UNKNOWN_TIME_KB = ReplyKeyboardMarkup(
     keyboard=[[KeyboardButton(text=BTN_UNKNOWN_TIME)]],
@@ -19,18 +14,44 @@ UNKNOWN_TIME_KB = ReplyKeyboardMarkup(
     one_time_keyboard=True,
 )
 
-MENU_INLINE_KB = InlineKeyboardMarkup(
+# --- Reply menu (free) ---
+BTN_MY_CHART = "🌙 Моя карта"
+BTN_PREMIUM = "💎 Premium"
+BTN_SUPPORT = "💬 Поддержка"
+
+# --- Reply menu (premium only) ---
+BTN_COMPAT = "❤️ Совместимость"
+BTN_QUESTIONS = "🔮 Вопросы"
+BTN_ASK = "✍️ Задать вопрос"
+BTN_HOROSCOPE = "📅 Гороскопы"
+
+
+def main_menu_kb(premium: bool) -> ReplyKeyboardMarkup:
+    if premium:
+        rows = [
+            [BTN_MY_CHART, BTN_COMPAT],
+            [BTN_QUESTIONS, BTN_ASK],
+            [BTN_HOROSCOPE, BTN_SUPPORT],
+        ]
+    else:
+        rows = [
+            [BTN_MY_CHART, BTN_PREMIUM],
+            [BTN_SUPPORT],
+        ]
+    return ReplyKeyboardMarkup(keyboard=rows, resize_keyboard=True)
+
+
+# --- Paywall ---
+BTN_UNLOCK_PREMIUM = "💎 Открыть полную карту — 249 ₽"
+
+PAYWALL_KB = InlineKeyboardMarkup(
     inline_keyboard=[
-        [InlineKeyboardButton(text="❤️ Совместимость", callback_data="menu:compat")],
-        [InlineKeyboardButton(text="🔮 Задать вопрос", callback_data="menu:question")],
-        [InlineKeyboardButton(text="💰 Деньги и карьера", callback_data="menu:money")],
-        [InlineKeyboardButton(text="🌙 Любовь и отношения", callback_data="menu:love")],
-        [InlineKeyboardButton(text="📅 Прогноз", callback_data="menu:forecast")],
+        [InlineKeyboardButton(text=BTN_UNLOCK_PREMIUM, callback_data="pay:unlock")],
     ]
 )
 
-# callback_data: quick:<ключ>
-QUICK_QUESTIONS: dict[str, str] = {
+# --- Популярные вопросы (premium) ---
+POPULAR_QUESTIONS: dict[str, str] = {
     "love_luck": "Почему мне не везет в любви?",
     "talent": "В чем мой талант?",
     "burnout": "Почему я выгораю?",
@@ -38,9 +59,20 @@ QUICK_QUESTIONS: dict[str, str] = {
     "people": "Почему мне сложно с людьми?",
 }
 
-QUICK_QUESTIONS_KB = InlineKeyboardMarkup(
+POPULAR_QUESTIONS_KB = InlineKeyboardMarkup(
     inline_keyboard=[
-        [InlineKeyboardButton(text=text, callback_data=f"quick:{key}")]
-        for key, text in QUICK_QUESTIONS.items()
+        [InlineKeyboardButton(text=text, callback_data=f"pop:{key}")]
+        for key, text in POPULAR_QUESTIONS.items()
+    ]
+)
+
+# --- Гороскопы (premium) ---
+HOROSCOPE_KB = InlineKeyboardMarkup(
+    inline_keyboard=[
+        [
+            InlineKeyboardButton(text="Сегодня", callback_data="horo:today"),
+            InlineKeyboardButton(text="Неделя", callback_data="horo:week"),
+        ],
+        [InlineKeyboardButton(text="Месяц", callback_data="horo:month")],
     ]
 )

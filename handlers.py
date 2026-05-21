@@ -2,8 +2,6 @@ import asyncio
 import logging
 import re
 
-logger = logging.getLogger(__name__)
-
 from aiogram import F, Router
 from aiogram.filters import Command, CommandStart
 from aiogram.fsm.context import FSMContext
@@ -11,88 +9,106 @@ from aiogram.types import CallbackQuery, FSInputFile, Message, ReplyKeyboardRemo
 from openai import AsyncOpenAI
 
 from config import OPENAI_API_KEY, OPENAI_MODEL
-from database import save_user
+from database import get_user, is_premium, save_readings, save_user, set_premium
 from keyboards import (
-    BTN_CREATE_CARD,
+    BTN_ASK,
+    BTN_COMPAT,
+    BTN_HOROSCOPE,
+    BTN_MY_CHART,
+    BTN_PREMIUM,
+    BTN_QUESTIONS,
+    BTN_SUPPORT,
     BTN_UNKNOWN_TIME,
-    MAIN_REPLY_KB,
-    MENU_INLINE_KB,
-    QUICK_QUESTIONS,
-    QUICK_QUESTIONS_KB,
+    HOROSCOPE_KB,
+    PAYWALL_KB,
+    POPULAR_QUESTIONS,
+    POPULAR_QUESTIONS_KB,
     UNKNOWN_TIME_KB,
+    main_menu_kb,
 )
 from states import BirthForm, CompatibilityForm
 
+logger = logging.getLogger(__name__)
 router = Router()
 _openai = AsyncOpenAI(api_key=OPENAI_API_KEY)
 
-WELCOME_INTRO = (
+ONBOARDING_WELCOME = (
     "✨ Добро пожаловать в Lunara\n\n"
-    "Я создам твою персональную натальную карту и расскажу:\n"
+    "Я создам твою персональную натальную карту:\n"
     "• кто ты на самом деле\n"
-    "• что у тебя с любовью\n"
-    "• где твои сильные стороны\n"
-    "• почему в жизни повторяются одни и те же ситуации\n\n"
-    "Нажми кнопку ниже, чтобы начать 💫"
+    "• что с любовью и деньгами\n"
+    "• твоя главная черта\n\n"
+    "Для начала — несколько данных о рождении 💫\n\n"
+    "Как тебя зовут?"
+)
+
+PAYWALL_TEXT = (
+    "🔒 Полная версия натальной карты скрыта\n\n"
+    "В полной версии:\n"
+    "• отношения\n"
+    "• предназначение\n"
+    "• деньги\n"
+    "• жизненные сценарии\n"
+    "• скрытые таланты"
+)
+
+SUPPORT_TEXT = (
+    "💬 Поддержка Lunara\n\n"
+    "По вопросам оплаты, доступа и работы бота — напиши сюда, "
+    "мы ответим в ближайшее время."
 )
 
 _ASTRO_STYLE = (
-    "Ты премиальный астрологический AI-сервис Lunara.\n\n"
-    "Пиши эмоционально, красиво и современно.\n"
-    "Не используй сложные астрологические термины.\n"
-    "Пиши так, чтобы человек чувствовал: «это точно про меня».\n\n"
-    "Текст должен быть атмосферным, персональным, вовлекающим и не слишком длинным.\n"
-    "Без медицинских и юридических советов, без катастрофического языка.\n"
-    "Если время рождения неизвестно — скажи об этом мягко, опирайся на дату и место."
+    "Ты премиальный астрологический AI-сервис Lunara.\n"
+    "Пиши эмоционально, красиво, современно, без сложных терминов.\n"
+    "Читатель должен чувствовать: «это точно про меня».\n"
+    "Коротко, атмосферно, без медицины и катастроф."
 )
 
-_SYSTEM_PROMPT = (
+_FREE_PROMPT = (
     _ASTRO_STYLE
-    + "\n\nПо данным рождения сделай натальную карту на русском языке.\n"
-    "Строго соблюдай структуру с эмодзи в заголовках:\n"
-    "1. ✨ Кто человек\n"
-    "2. ⚡ Его сильная сторона\n"
-    "3. 🔮 Главная проблема\n"
-    "4. 💕 Любовь и отношения\n"
-    "5. 💰 Деньги и реализация\n"
-    "6. 🌑 Что ему мешает\n"
-    "7. 🌟 Его скрытый потенциал\n\n"
-    "В каждом разделе — 1–2 коротких абзаца."
+    + "\n\nБесплатный мини-разбор. Строго 4 блока с эмодзи:\n"
+    "1. ✨ Кто человек (2–3 предложения)\n"
+    "2. 💕 Любовь (2–3 предложения)\n"
+    "3. 💰 Деньги (2–3 предложения)\n"
+    "4. ⚡ Главная черта личности (2–3 предложения)"
 )
 
-_COMPAT_SYSTEM = (
+_FULL_PROMPT = (
     _ASTRO_STYLE
-    + "\n\nСделай разбор совместимости двух людей по их данным. "
-    "Пиши эмоционально и понятно, без сложных астрологических терминов.\n"
-    "Строго соблюдай структуру с эмодзи в заголовках:\n"
-    "1. 💕 Эмоциональная совместимость\n"
-    "2. 🔥 Сильное притяжение\n"
-    "3. ⚡ Основные конфликты\n"
-    "4. 🌱 Перспектива отношений\n"
-    "5. 🌑 Что может разрушить отношения\n\n"
-    "В каждом разделе — 1–2 коротких абзаца."
+    + "\n\nПолная натальная карта. Строго 5 блоков с эмодзи:\n"
+    "1. 💕 Отношения\n"
+    "2. 🌟 Предназначение\n"
+    "3. 💰 Деньги\n"
+    "4. 🔮 Жизненные сценарии\n"
+    "5. ✨ Скрытые таланты\n"
+    "В каждом — 2 коротких абзаца."
 )
 
-_MENU_PROMPTS = {
-    "money": (
-        "Сделай раздел про деньги и карьеру: сильные стороны в работе, подходящие направления, "
-        "что мешает зарабатывать, практичные советы на ближайшие месяцы."
-    ),
-    "love": (
-        "Сделай раздел про любовь и отношения: как проявляется в паре, что важно в партнёре, "
-        "типичные сценарии, мягкие рекомендации."
-    ),
-    "forecast": (
-        "Сделай краткий прогноз на ближайшие 3–6 месяцев: ключевые темы, возможности, "
-        "на что обратить внимание. Без точных дат «предсказаний»."
-    ),
+_COMPAT_PROMPT = (
+    _ASTRO_STYLE
+    + "\n\nРазбор совместимости. 5 блоков: 💕 эмоции, 🔥 притяжение, "
+    "⚡ конфликты, 🌱 перспектива, 🌑 что разрушит."
+)
+
+_QUESTION_PROMPT = (
+    _ASTRO_STYLE + "\n\nОтвет на вопрос по карте. 2–3 абзаца, эмодзи в заголовке."
+)
+
+_HOROSCOPE_PROMPTS = {
+    "today": "Гороскоп на сегодня",
+    "week": "Гороскоп на неделю",
+    "month": "Гороскоп на месяц",
 }
 
-_DATE_RE = re.compile(
-    r"^\s*(\d{1,2})[./-](\d{1,2})[./-](\d{2,4})\s*$"
-)
-_TIME_RE = re.compile(
-    r"^\s*(\d{1,2}):(\d{2})(?::(\d{2}))?\s*$"
+_DATE_RE = re.compile(r"^\s*(\d{1,2})[./-](\d{1,2})[./-](\d{2,4})\s*$")
+_TIME_RE = re.compile(r"^\s*(\d{1,2}):(\d{2})(?::(\d{2}))?\s*$")
+
+_PROGRESS = (
+    "✨ Анализирую положение планет...",
+    "🌙 Изучаю твою личность...",
+    "❤️ Смотрю сферу отношений...",
+    "💰 Считаю денежный потенциал...",
 )
 
 
@@ -117,38 +133,22 @@ def _parse_time(text: str) -> tuple[int, int] | None:
     if not m:
         return None
     h, mi = int(m.group(1)), int(m.group(2))
-    if not (0 <= h <= 23 and 0 <= mi <= 59):
-        return None
-    return h, mi
+    if 0 <= h <= 23 and 0 <= mi <= 59:
+        return h, mi
+    return None
 
 
 def _profile_prompt(data: dict) -> str:
     return (
         f"Имя: {data['name']}\n"
-        f"Дата рождения: {data['birth_date']}\n"
-        f"Время рождения: {data['birth_time']}\n"
-        f"Место рождения: {data['birth_place']}\n"
+        f"Дата: {data['birth_date']}\n"
+        f"Время: {data['birth_time']}\n"
+        f"Место: {data['birth_place']}\n"
     )
 
 
-_GENERATION_STEPS = (
-    "✨ Анализирую положение планет...",
-    "🌙 Изучаю твою личность...",
-    "❤️ Анализирую сферу отношений...",
-    "💰 Смотрю денежный потенциал...",
-)
-_GENERATION_STEP_DELAY = 1.5
-
-
-async def _send_generation_progress(message: Message) -> None:
-    for i, text in enumerate(_GENERATION_STEPS):
-        await message.answer(text)
-        if i < len(_GENERATION_STEPS) - 1:
-            await asyncio.sleep(_GENERATION_STEP_DELAY)
-
-
 async def _call_openai(system: str, user: str) -> str:
-    completion = await _openai.chat.completions.create(
+    r = await _openai.chat.completions.create(
         model=OPENAI_MODEL,
         messages=[
             {"role": "system", "content": system},
@@ -156,402 +156,407 @@ async def _call_openai(system: str, user: str) -> str:
         ],
         temperature=0.7,
     )
-    return completion.choices[0].message.content or ""
+    return r.choices[0].message.content or ""
 
 
-async def _send_long_text(message: Message, text: str) -> None:
-    chunk_size = 4000
-    for i in range(0, len(text), chunk_size):
-        await message.answer(text[i : i + chunk_size])
+async def _send_long(message: Message, text: str) -> None:
+    for i in range(0, len(text), 4000):
+        await message.answer(text[i : i + 4000])
 
 
-async def _send_quick_questions(message: Message) -> None:
-    await message.answer(
-        "✨ Что ты хочешь узнать?",
-        reply_markup=QUICK_QUESTIONS_KB,
-    )
-
-
-async def _send_after_menu(message: Message) -> None:
-    await _send_quick_questions(message)
-    await message.answer(
-        "Или выбери другой раздел 👇",
-        reply_markup=MENU_INLINE_KB,
-    )
-
-
-def _compat_user_prompt(profile: dict, partner_name: str, partner_birth_date: str) -> str:
-    parts = [
-        "Сделай разбор совместимости для пары.",
-        "",
-        "Первый человек (пользователь):",
-        _profile_prompt(profile),
-    ]
-    chart = profile.get("natal_chart")
-    if chart:
-        parts.extend(["", "Натальная карта пользователя:", chart])
-    parts.extend(
-        [
-            "",
-            "Партнёр:",
-            f"Имя: {partner_name}",
-            f"Дата рождения: {partner_birth_date}",
-        ]
-    )
-    return "\n".join(parts)
-
-
-def _question_user_prompt(profile: dict, question: str) -> str:
-    parts = [
-        f"Вопрос: {question}",
-        "",
-        "Данные рождения:",
-        _profile_prompt(profile),
-    ]
-    chart = profile.get("natal_chart")
-    if chart:
-        parts.extend(["", "Натальная карта пользователя:", chart])
-    return "\n".join(parts)
-
-
-_QUESTION_SYSTEM = (
-    _ASTRO_STYLE
-    + "\n\nОтветь на вопрос пользователя, опираясь на данные рождения и его натальную карту. "
-    "2–3 абзаца, с эмодзи в заголовке."
-)
+async def _progress(message: Message) -> None:
+    for i, t in enumerate(_PROGRESS):
+        await message.answer(t)
+        if i < len(_PROGRESS) - 1:
+            await asyncio.sleep(1.4)
 
 
 async def _get_profile(state: FSMContext) -> dict | None:
-    data = await state.get_data()
-    if not data.get("name") or not data.get("birth_date"):
+    d = await state.get_data()
+    return d if d.get("name") and d.get("birth_date") else None
+
+
+async def _sync_db_to_state(state: FSMContext, telegram_id: int) -> dict | None:
+    row = get_user(telegram_id)
+    if not row:
         return None
-    return data
-
-
-async def _begin_form(message: Message, state: FSMContext) -> None:
-    await state.clear()
-    await state.set_state(BirthForm.name)
-    await message.answer(
-        "Как тебя зовут?",
-        reply_markup=ReplyKeyboardRemove(),
+    await state.update_data(
+        name=row["name"],
+        birth_date=row["birth_date"],
+        birth_time=row["birth_time"],
+        birth_place=row["birth_place"],
+        free_reading=row.get("free_reading") or "",
+        full_reading=row.get("full_reading") or "",
     )
+    return row
+
+
+async def _show_menu(message: Message, telegram_id: int) -> None:
+    premium = is_premium(telegram_id)
+    if premium:
+        text = "💎 Premium активен\n\nВыбери раздел в меню 👇"
+    else:
+        text = "Готово ✨\n\nВыбери раздел в меню 👇"
+    await message.answer(text, reply_markup=main_menu_kb(premium))
+
+
+async def _show_paywall(message: Message) -> None:
+    await message.answer(PAYWALL_TEXT, reply_markup=PAYWALL_KB)
+
+
+async def _require_premium_message(message: Message, telegram_id: int) -> bool:
+    if is_premium(telegram_id):
+        return True
+    await message.answer(
+        "🔒 Этот раздел доступен в Premium.\n\n" + PAYWALL_TEXT.split("\n\n", 1)[-1],
+        reply_markup=PAYWALL_KB,
+    )
+    return False
+
+
+# --- /start, onboarding ---
 
 
 @router.message(CommandStart())
 async def cmd_start(message: Message, state: FSMContext) -> None:
+    tid = message.from_user.id if message.from_user else 0
+    row = await _sync_db_to_state(state, tid)
+    if row and row.get("name"):
+        await state.set_state(None)
+        name = row["name"]
+        await message.answer(
+            f"С возвращением, {name} ✨\nТвоя карта Lunara сохранена.",
+            reply_markup=main_menu_kb(is_premium(tid)),
+        )
+        return
     await state.clear()
-    await message.answer(WELCOME_INTRO, reply_markup=MAIN_REPLY_KB)
-
-
-@router.message(Command("form"))
-async def cmd_form(message: Message, state: FSMContext) -> None:
-    await _begin_form(message, state)
+    await state.set_state(BirthForm.name)
+    await message.answer(ONBOARDING_WELCOME, reply_markup=ReplyKeyboardRemove())
 
 
 @router.message(Command("cancel"))
 async def cmd_cancel(message: Message, state: FSMContext) -> None:
-    await state.clear()
-    await message.answer(
-        "Анкета сброшена. Нажми «✨ Создать мою карту», чтобы начать снова 💫",
-        reply_markup=MAIN_REPLY_KB,
-    )
-
-
-@router.message(F.text == BTN_CREATE_CARD)
-async def btn_create_card(message: Message, state: FSMContext) -> None:
-    current = await state.get_state()
-    if current:
-        await message.answer(
-            "Сначала закончи текущий шаг или напиши /cancel, чтобы начать заново."
-        )
-        return
-    await _begin_form(message, state)
+    tid = message.from_user.id if message.from_user else 0
+    await state.set_state(None)
+    row = get_user(tid)
+    if row:
+        await _sync_db_to_state(state, tid)
+        await message.answer("Отменено.", reply_markup=main_menu_kb(is_premium(tid)))
+    else:
+        await state.clear()
+        await message.answer("Отменено. Нажми /start, чтобы начать.")
 
 
 @router.message(BirthForm.name, F.text)
-async def process_name(message: Message, state: FSMContext) -> None:
-    if message.text.strip() == BTN_CREATE_CARD:
-        return
+async def on_name(message: Message, state: FSMContext) -> None:
     name = message.text.strip()
     if len(name) < 2:
-        await message.answer("Имя слишком короткое. Введите, пожалуйста, полноценное имя.")
+        await message.answer("Напиши имя чуть длиннее 🙏")
         return
     await state.update_data(name=name)
     await state.set_state(BirthForm.birth_date)
-    await message.answer(
-        "📅 Дата рождения в формате ДД.ММ.ГГГГ (например, 15.03.1990)."
-    )
+    await message.answer("📅 Дата рождения — ДД.ММ.ГГГГ (например, 15.03.1990)")
 
 
 @router.message(BirthForm.birth_date, F.text)
-async def process_birth_date(message: Message, state: FSMContext) -> None:
-    parsed = _parse_date(message.text)
-    if not parsed:
-        await message.answer(
-            "Не удалось разобрать дату. Используйте ДД.ММ.ГГГГ, например 08.11.2001."
-        )
+async def on_date(message: Message, state: FSMContext) -> None:
+    p = _parse_date(message.text)
+    if not p:
+        await message.answer("Формат: ДД.ММ.ГГГГ, например 08.11.2001")
         return
-    y, mo, d = parsed
+    y, mo, d = p
     await state.update_data(birth_date=f"{d:02d}.{mo:02d}.{y}")
     await state.set_state(BirthForm.birth_time)
     await message.answer(
-        "🕐 Время рождения в формате ЧЧ:ММ (24 часа), например 14:30.\n"
-        "Если не знаешь — нажми кнопку ниже.",
+        "🕐 Время рождения — ЧЧ:ММ (24ч)\nИли нажми «Не знаю»",
         reply_markup=UNKNOWN_TIME_KB,
     )
 
 
 @router.message(BirthForm.birth_time, F.text)
-async def process_birth_time(message: Message, state: FSMContext) -> None:
-    text = message.text.strip()
-    if text == BTN_UNKNOWN_TIME:
+async def on_time(message: Message, state: FSMContext) -> None:
+    t = message.text.strip()
+    if t == BTN_UNKNOWN_TIME:
         await state.update_data(birth_time="неизвестно")
     else:
-        parsed = _parse_time(text)
-        if not parsed:
-            await message.answer(
-                "Укажи время как ЧЧ:ММ, например 09:05 или 21:40, или нажми «Не знаю»."
-            )
+        p = _parse_time(t)
+        if not p:
+            await message.answer("Формат ЧЧ:ММ или кнопка «Не знаю»")
             return
-        h, mi = parsed
+        h, mi = p
         await state.update_data(birth_time=f"{h:02d}:{mi:02d}")
     await state.set_state(BirthForm.birth_place)
     await message.answer(
-        "📍 Город и страна рождения (например, Москва, Россия).",
+        "📍 Место рождения (город, страна)",
         reply_markup=ReplyKeyboardRemove(),
     )
 
 
 @router.message(BirthForm.birth_place, F.text)
-async def process_birth_place(message: Message, state: FSMContext) -> None:
+async def on_place(message: Message, state: FSMContext) -> None:
     place = message.text.strip()
     if len(place) < 2:
-        await message.answer("Уточните место рождения (город и при необходимости страна).")
+        await message.answer("Уточни город и страну")
         return
+    tid = message.from_user.id if message.from_user else 0
     await state.update_data(birth_place=place)
     data = await state.get_data()
 
-    if message.from_user:
-        save_user(
-            telegram_id=message.from_user.id,
-            name=data["name"],
-            birth_date=data["birth_date"],
-            birth_time=data["birth_time"],
-            birth_place=place,
-        )
+    save_user(
+        tid,
+        data["name"],
+        data["birth_date"],
+        data["birth_time"],
+        place,
+    )
 
     await state.set_state(None)
+    await _progress(message)
 
     try:
         from chart_generator import generate_natal_chart_png
 
-        png_path = await asyncio.to_thread(
+        png = await asyncio.to_thread(
             generate_natal_chart_png,
-            telegram_id=message.from_user.id if message.from_user else 0,
+            telegram_id=tid,
             name=data["name"],
             birth_date=data["birth_date"],
             birth_time=data["birth_time"],
             birth_place=place,
         )
         await message.answer_photo(
-            FSInputFile(png_path),
+            FSInputFile(png),
             caption="✨ Твоя натальная карта Lunara",
         )
     except Exception as e:  # noqa: BLE001
-        logger.warning("Не удалось сгенерировать карту: %s", e)
-        await message.answer(
-            "Не получилось построить изображение карты — продолжаю текстовый разбор ✨"
-        )
-
-    await _send_generation_progress(message)
-
-    prompt = _profile_prompt(data)
+        logger.warning("Chart: %s", e)
+        await message.answer("Карту не удалось построить — даю текстовый разбор ✨")
 
     try:
-        text = await _call_openai(
-            _SYSTEM_PROMPT,
-            "Сделай натальный разбор Lunara по данным:\n\n" + prompt,
+        free = await _call_openai(
+            _FREE_PROMPT,
+            "Мини-разбор:\n\n" + _profile_prompt(data),
         )
     except Exception as e:  # noqa: BLE001
-        await message.answer(
-            "Не удалось получить ответ от OpenAI. Проверьте ключ API, баланс и название модели.\n"
-            f"Техническая информация: {type(e).__name__}: {e}",
-            reply_markup=MAIN_REPLY_KB,
-        )
+        await message.answer(f"Ошибка OpenAI: {type(e).__name__}: {e}")
         return
 
-    await state.update_data(natal_chart=text)
-    await _send_long_text(message, text)
-    await message.answer("Готово ✨", reply_markup=MAIN_REPLY_KB)
-    await _send_after_menu(message)
+    await state.update_data(free_reading=free)
+    save_readings(tid, free_reading=free)
+    await message.answer("🎁 Твой бесплатный разбор\n")
+    await _send_long(message, free)
+    await _show_paywall(message)
+    await _show_menu(message, tid)
 
 
-@router.callback_query(F.data.startswith("quick:"))
-async def on_quick_question(callback: CallbackQuery, state: FSMContext) -> None:
-    profile = await _get_profile(state)
-    if not profile or not profile.get("natal_chart"):
-        await callback.answer("Сначала создай натальную карту ✨", show_alert=True)
-        return
-
-    key = callback.data.split(":", 1)[1]
-    question = QUICK_QUESTIONS.get(key)
-    if not question:
-        await callback.answer()
-        return
-
-    await callback.answer()
-    await callback.message.answer(f"🔮 {question}\n\nСмотрю в твою карту…")
-
-    try:
-        text = await _call_openai(
-            _QUESTION_SYSTEM,
-            _question_user_prompt(profile, question),
-        )
-    except Exception as e:  # noqa: BLE001
-        await callback.message.answer(
-            f"Не удалось получить ответ. {type(e).__name__}: {e}",
-            reply_markup=MAIN_REPLY_KB,
-        )
-        return
-
-    await _send_long_text(callback.message, text)
-    await callback.message.answer("Готово ✨", reply_markup=MAIN_REPLY_KB)
-    await _send_after_menu(callback.message)
+# --- Paywall ---
 
 
-@router.callback_query(F.data.startswith("menu:"))
-async def on_menu_click(callback: CallbackQuery, state: FSMContext) -> None:
-    profile = await _get_profile(state)
+@router.callback_query(F.data == "pay:unlock")
+async def on_pay_unlock(callback: CallbackQuery, state: FSMContext) -> None:
+    tid = callback.from_user.id
+    await callback.answer("Открываем полную карту… ✨")
+    profile = await _get_profile(state) or await _sync_db_to_state(state, tid)
     if not profile:
-        await callback.answer("Сначала создай карту ✨", show_alert=True)
+        await callback.message.answer("Сначала пройди onboarding: /start")
         return
 
-    topic = callback.data.split(":", 1)[1]
-
-    if topic == "question":
-        await callback.answer()
-        await state.set_state(BirthForm.custom_question)
-        await callback.message.answer(
-            "🔮 Напиши свой вопрос одним сообщением — отвечу с опорой на твою карту."
-        )
-        return
-
-    if topic == "compat":
-        await callback.answer()
-        await state.set_state(CompatibilityForm.partner_name)
-        await callback.message.answer(
-            "❤️ Совместимость\n\n"
-            "Как зовут партнёра? (имя или имя и фамилия)"
-        )
-        return
-
-    await callback.answer()
-    await callback.message.answer("Смотрю в карту… ✨")
-
-    user_prompt = _MENU_PROMPTS.get(topic, "Дай полезный астрологический совет.")
-    try:
-        text = await _call_openai(
-            _QUESTION_SYSTEM,
-            _question_user_prompt(profile, user_prompt),
-        )
-    except Exception as e:  # noqa: BLE001
-        await callback.message.answer(
-            f"Не удалось получить ответ. {type(e).__name__}: {e}",
-            reply_markup=MAIN_REPLY_KB,
-        )
-        return
-
-    await _send_long_text(callback.message, text)
-    await _send_after_menu(callback.message)
-
-
-@router.message(CompatibilityForm.partner_name, F.text)
-async def process_partner_name(message: Message, state: FSMContext) -> None:
-    name = message.text.strip()
-    if len(name) < 2:
-        await message.answer("Напиши имя партнёра чуть подробнее 🙏")
-        return
-    await state.update_data(partner_name=name)
-    await state.set_state(CompatibilityForm.partner_birth_date)
-    await message.answer(
-        f"📅 Дата рождения {name} в формате ДД.ММ.ГГГГ (например, 22.07.1992)."
+    set_premium(tid, True)
+    await callback.message.answer(
+        "💎 Premium активирован!\n"
+        "(тестовый режим — оплата 249 ₽ будет подключена позже)"
     )
 
-
-@router.message(CompatibilityForm.partner_birth_date, F.text)
-async def process_partner_birth_date(message: Message, state: FSMContext) -> None:
-    profile = await _get_profile(state)
-    if not profile:
-        await state.set_state(None)
-        await message.answer(
-            "Сначала создай свою карту кнопкой «✨ Создать мою карту».",
-            reply_markup=MAIN_REPLY_KB,
-        )
-        return
-
-    parsed = _parse_date(message.text)
-    if not parsed:
-        await message.answer(
-            "Не удалось разобрать дату. Используй ДД.ММ.ГГГГ, например 08.11.2001."
-        )
-        return
-
-    y, mo, d = parsed
-    partner_date = f"{d:02d}.{mo:02d}.{y}"
     data = await state.get_data()
-    partner_name = data.get("partner_name", "Партнёр")
+    if data.get("full_reading"):
+        full = data["full_reading"]
+    else:
+        await callback.message.answer("🌙 Создаю полную карту…")
+        try:
+            full = await _call_openai(
+                _FULL_PROMPT,
+                "Полная карта:\n\n" + _profile_prompt(data),
+            )
+        except Exception as e:  # noqa: BLE001
+            await callback.message.answer(f"Ошибка: {e}")
+            return
+        await state.update_data(full_reading=full)
+        save_readings(tid, full_reading=full)
 
-    await state.set_state(None)
-    await message.answer("❤️ Смотрю вашу совместимость…")
+    await callback.message.answer("💎 Полная натальная карта\n")
+    await _send_long(callback.message, full)
+    await _show_menu(callback.message, tid)
 
+
+# --- Reply menu ---
+
+
+@router.message(F.text == BTN_MY_CHART)
+async def menu_my_chart(message: Message, state: FSMContext) -> None:
+    tid = message.from_user.id if message.from_user else 0
+    profile = await _get_profile(state) or await _sync_db_to_state(state, tid)
+    if not profile:
+        await message.answer("Карты ещё нет — нажми /start")
+        return
+    free = profile.get("free_reading") or ""
+    if free:
+        await message.answer("🌙 Твоя карта (бесплатный разбор)\n")
+        await _send_long(message, free)
+    if is_premium(tid) and profile.get("full_reading"):
+        await message.answer("💎 Полная версия\n")
+        await _send_long(message, profile["full_reading"])
+    elif not is_premium(tid):
+        await _show_paywall(message)
+
+
+@router.message(F.text == BTN_PREMIUM)
+async def menu_premium(message: Message, state: FSMContext) -> None:
+    tid = message.from_user.id if message.from_user else 0
+    if is_premium(tid):
+        await message.answer("💎 У тебя уже открыт Premium ✨")
+        return
+    await _show_paywall(message)
+
+
+@router.message(F.text == BTN_SUPPORT)
+async def menu_support(message: Message) -> None:
+    await message.answer(SUPPORT_TEXT)
+
+
+@router.message(F.text == BTN_COMPAT)
+async def menu_compat(message: Message, state: FSMContext) -> None:
+    tid = message.from_user.id if message.from_user else 0
+    if not await _require_premium_message(message, tid):
+        return
+    if not await _get_profile(state):
+        await _sync_db_to_state(state, tid)
+    await state.set_state(CompatibilityForm.partner_name)
+    await message.answer("❤️ Совместимость\n\nКак зовут партнёра?")
+
+
+@router.message(F.text == BTN_QUESTIONS)
+async def menu_questions(message: Message, state: FSMContext) -> None:
+    tid = message.from_user.id if message.from_user else 0
+    if not await _require_premium_message(message, tid):
+        return
+    await message.answer("🔮 Популярные вопросы — выбери:", reply_markup=POPULAR_QUESTIONS_KB)
+
+
+@router.message(F.text == BTN_ASK)
+async def menu_ask(message: Message, state: FSMContext) -> None:
+    tid = message.from_user.id if message.from_user else 0
+    if not await _require_premium_message(message, tid):
+        return
+    await state.set_state(BirthForm.custom_question)
+    await message.answer("✍️ Напиши свой вопрос одним сообщением")
+
+
+@router.message(F.text == BTN_HOROSCOPE)
+async def menu_horoscope(message: Message, state: FSMContext) -> None:
+    tid = message.from_user.id if message.from_user else 0
+    if not await _require_premium_message(message, tid):
+        return
+    await message.answer("📅 Гороскопы — выбери период:", reply_markup=HOROSCOPE_KB)
+
+
+# --- Premium: популярные вопросы, гороскоп, свой вопрос, совместимость ---
+
+
+@router.callback_query(F.data.startswith("pop:"))
+async def on_popular(callback: CallbackQuery, state: FSMContext) -> None:
+    tid = callback.from_user.id
+    if not is_premium(tid):
+        await callback.answer("Только Premium", show_alert=True)
+        return
+    key = callback.data.split(":", 1)[1]
+    q = POPULAR_QUESTIONS.get(key)
+    if not q:
+        await callback.answer()
+        return
+    profile = await _get_profile(state) or await _sync_db_to_state(state, tid)
+    await callback.answer()
+    await callback.message.answer(f"🔮 {q}")
     try:
         text = await _call_openai(
-            _COMPAT_SYSTEM,
-            _compat_user_prompt(profile, partner_name, partner_date),
+            _QUESTION_PROMPT,
+            f"{q}\n\n{_profile_prompt(profile)}",
         )
+        await _send_long(callback.message, text)
     except Exception as e:  # noqa: BLE001
-        await message.answer(
-            f"Не удалось получить ответ. {type(e).__name__}: {e}",
-            reply_markup=MAIN_REPLY_KB,
-        )
-        return
+        await callback.message.answer(f"Ошибка: {e}")
 
-    await _send_long_text(message, text)
-    await message.answer("Готово ✨", reply_markup=MAIN_REPLY_KB)
-    await _send_after_menu(message)
+
+@router.callback_query(F.data.startswith("horo:"))
+async def on_horo(callback: CallbackQuery, state: FSMContext) -> None:
+    tid = callback.from_user.id
+    if not is_premium(tid):
+        await callback.answer("Только Premium", show_alert=True)
+        return
+    period = callback.data.split(":", 1)[1]
+    label = _HOROSCOPE_PROMPTS.get(period, "Прогноз")
+    profile = await _get_profile(state) or await _sync_db_to_state(state, tid)
+    await callback.answer()
+    await callback.message.answer(f"📅 {label}…")
+    try:
+        text = await _call_openai(
+            _QUESTION_PROMPT,
+            f"{label} для человека:\n\n{_profile_prompt(profile)}",
+        )
+        await _send_long(callback.message, text)
+    except Exception as e:  # noqa: BLE001
+        await callback.message.answer(f"Ошибка: {e}")
 
 
 @router.message(BirthForm.custom_question, F.text)
-async def process_custom_question(message: Message, state: FSMContext) -> None:
-    profile = await _get_profile(state)
-    if not profile:
-        await state.set_state(None)
-        await message.answer(
-            "Сначала создай карту кнопкой «✨ Создать мою карту».",
-            reply_markup=MAIN_REPLY_KB,
-        )
+async def on_custom_q(message: Message, state: FSMContext) -> None:
+    tid = message.from_user.id if message.from_user else 0
+    if not is_premium(tid):
+        await _require_premium_message(message, tid)
         return
-
-    question = message.text.strip()
-    if len(question) < 3:
-        await message.answer("Напиши вопрос чуть подробнее 🙏")
+    q = message.text.strip()
+    if len(q) < 3:
+        await message.answer("Вопрос покороче 🙂")
         return
-
+    profile = await _get_profile(state) or await _sync_db_to_state(state, tid)
     await state.set_state(None)
-    await message.answer("🔮 Ищу ответ в твоей карте…")
-
+    await message.answer("✍️ Ищу ответ…")
     try:
-        text = await _call_openai(
-            _QUESTION_SYSTEM,
-            _question_user_prompt(profile, question),
-        )
+        text = await _call_openai(_QUESTION_PROMPT, f"{q}\n\n{_profile_prompt(profile)}")
+        await _send_long(message, text)
     except Exception as e:  # noqa: BLE001
-        await message.answer(
-            f"Не удалось получить ответ. {type(e).__name__}: {e}",
-            reply_markup=MAIN_REPLY_KB,
-        )
-        return
+        await message.answer(f"Ошибка: {e}")
 
-    await _send_long_text(message, text)
-    await message.answer("Готово ✨", reply_markup=MAIN_REPLY_KB)
-    await _send_after_menu(message)
+
+@router.message(CompatibilityForm.partner_name, F.text)
+async def on_partner_name(message: Message, state: FSMContext) -> None:
+    n = message.text.strip()
+    if len(n) < 2:
+        await message.answer("Имя партнёра подлиннее")
+        return
+    await state.update_data(partner_name=n)
+    await state.set_state(CompatibilityForm.partner_birth_date)
+    await message.answer(f"📅 Дата рождения {n} — ДД.ММ.ГГГГ")
+
+
+@router.message(CompatibilityForm.partner_birth_date, F.text)
+async def on_partner_date(message: Message, state: FSMContext) -> None:
+    p = _parse_date(message.text)
+    if not p:
+        await message.answer("Формат ДД.ММ.ГГГГ")
+        return
+    y, mo, d = p
+    data = await state.get_data()
+    profile = await _get_profile(state)
+    partner = data.get("partner_name", "Партнёр")
+    date_s = f"{d:02d}.{mo:02d}.{y}"
+    await state.set_state(None)
+    await message.answer("❤️ Считаю совместимость…")
+    prompt = (
+        f"Партнёр: {partner}, {date_s}\n\n"
+        f"Пользователь:\n{_profile_prompt(profile)}"
+    )
+    try:
+        text = await _call_openai(_COMPAT_PROMPT, prompt)
+        await _send_long(message, text)
+    except Exception as e:  # noqa: BLE001
+        await message.answer(f"Ошибка: {e}")
