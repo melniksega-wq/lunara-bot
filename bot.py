@@ -1,6 +1,12 @@
+import os
+
+# До тяжёлых импортов: matplotlib и Railway
+os.environ.setdefault("MPLCONFIGDIR", "/tmp/matplotlib")
+os.makedirs(os.environ["MPLCONFIGDIR"], exist_ok=True)
+
 import asyncio
 import logging
-import os
+import sys
 import threading
 from http.server import BaseHTTPRequestHandler, HTTPServer
 
@@ -23,7 +29,6 @@ class _HealthHandler(BaseHTTPRequestHandler):
 
 
 def _start_health_server() -> None:
-    """Railway ожидает процесс, слушающий PORT (healthcheck)."""
     port = int(os.getenv("PORT", "8080"))
     server = HTTPServer(("0.0.0.0", port), _HealthHandler)
     thread = threading.Thread(target=server.serve_forever, daemon=True)
@@ -31,12 +36,27 @@ def _start_health_server() -> None:
     logging.info("Health server on port %s", port)
 
 
+def _check_env() -> None:
+    missing = [
+        name
+        for name in ("BOT_TOKEN", "OPENAI_API_KEY")
+        if not os.getenv(name, "").strip()
+    ]
+    if missing:
+        logging.error(
+            "Не заданы переменные: %s. Railway → Service → Variables.",
+            ", ".join(missing),
+        )
+        sys.exit(1)
+
+
 async def main() -> None:
-    init_db()
     logging.basicConfig(
         level=logging.INFO,
         format="%(asctime)s %(levelname)s %(name)s %(message)s",
     )
+    _check_env()
+    init_db()
     _start_health_server()
     bot = Bot(token=BOT_TOKEN)
     dp = Dispatcher(storage=MemoryStorage())
@@ -46,4 +66,8 @@ async def main() -> None:
 
 
 if __name__ == "__main__":
-    asyncio.run(main())
+    try:
+        asyncio.run(main())
+    except Exception:
+        logging.exception("Bot crashed")
+        raise

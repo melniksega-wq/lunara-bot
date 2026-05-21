@@ -1,0 +1,2 @@
+[variables]
+MPLCONFIGDIR = "/tmp/matplotlib"

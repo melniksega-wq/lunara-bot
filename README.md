@@ -23,9 +23,12 @@ python3 bot.py
 | `OPENAI_API_KEY` | Ключ [OpenAI API](https://platform.openai.com/api-keys) |
 | `OPENAI_MODEL` | Необязательно, по умолчанию `gpt-4o-mini` |
 
-3. **Start Command:** `python bot.py` (уже в `railway.toml`).
-4. После деплоя в логах должно быть: `Health server on port …` и `Run polling for bot @…`.
-5. Не запускайте бота одновременно локально и на Railway — будет конфликт polling.
+3. **Start Command:** `python3 bot.py` (уже в `railway.toml`).
+4. Обязательны **оба** ключа: `BOT_TOKEN` и `OPENAI_API_KEY` (имена точно так).
+5. После деплоя в логах: `Health server on port …` → `Starting Telegram polling…` → `Run polling for bot @…`.
+6. Не запускайте бота одновременно локально и на Railway — будет конфликт polling.
+
+Если падает: откройте **Deployments → View logs** и проверьте строку с `RuntimeError` или `Missing env`.
 
 Файл `.env` в git не попадает — секреты только в Railway Variables.
 

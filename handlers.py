@@ -10,7 +10,6 @@ from aiogram.fsm.context import FSMContext
 from aiogram.types import CallbackQuery, FSInputFile, Message, ReplyKeyboardRemove
 from openai import AsyncOpenAI
 
-from chart_generator import generate_natal_chart_png
 from config import OPENAI_API_KEY, OPENAI_MODEL
 from database import save_user
 from keyboards import (
@@ -344,6 +343,8 @@ async def process_birth_place(message: Message, state: FSMContext) -> None:
     await state.set_state(None)
 
     try:
+        from chart_generator import generate_natal_chart_png
+
         png_path = await asyncio.to_thread(
             generate_natal_chart_png,
             telegram_id=message.from_user.id if message.from_user else 0,
