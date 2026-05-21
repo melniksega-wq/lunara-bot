@@ -39,6 +39,7 @@ from keyboards import (
     BTN_PREMIUM,
     BTN_QUESTIONS,
     BTN_SUPPORT,
+    KB_ASK,
     KB_HORO_MENU,
     KB_ONBOARD,
     KB_PAYWALL_ASK,
@@ -108,6 +109,23 @@ def menu_for(user_id: int):
 
 async def show_menu(msg: Message, user_id: int) -> None:
     await msg.answer("Выбери раздел 👇", reply_markup=menu_for(user_id))
+
+
+async def prompt_custom_question(
+    msg: Message, state: FSMContext, user_id: int
+) -> None:
+    u = get_user(user_id)
+    left = custom_questions_left(u)
+    if left <= 0:
+        await state.clear()
+        await msg.answer(PAYWALL_ASK_TEXT, reply_markup=KB_PAYWALL_ASK)
+        return
+    await state.set_state(Ask.waiting)
+    await msg.answer(
+        f"✍️ Напиши свой вопрос одним сообщением\n"
+        f"Осталось вопросов: {left}",
+        reply_markup=KB_ASK,
+    )
 
 
 async def deliver_full_chart(msg: Message, user_id: int) -> None:
@@ -325,7 +343,7 @@ async def on_place(msg: Message, state: FSMContext) -> None:
 
 
 @router.callback_query(F.data.startswith("pay:"))
-async def on_pay(cb: CallbackQuery) -> None:
+async def on_pay(cb: CallbackQuery, state: FSMContext) -> None:
     user_id = cb.from_user.id
     user = get_user(user_id)
     if not user or not is_profile_complete(user):
@@ -346,11 +364,12 @@ async def on_pay(cb: CallbackQuery) -> None:
         count = int(parts[2])
         add_custom_questions(user_id, count)
         u = get_user(user_id)
+        left = custom_questions_left(u)
         await cb.message.answer(
             f"✍️ Пакет на {count} вопросов открыт!{TEST_NOTE}\n"
-            f"Осталось: {custom_questions_left(u)}"
+            f"Можешь задать {left} вопрос(ов)."
         )
-        await show_menu(cb.message, user_id)
+        await prompt_custom_question(cb.message, state, user_id)
         return
 
     if parts[1] == "horo" and len(parts) == 3:
@@ -472,15 +491,10 @@ async def m_questions(msg: Message) -> None:
 @router.message(StateFilter(None), F.text == BTN_ASK)
 async def m_ask(msg: Message, state: FSMContext) -> None:
     u = get_user(tid(msg))
-    left = custom_questions_left(u)
     if not can_ask_custom(u):
         await msg.answer(PAYWALL_ASK_TEXT, reply_markup=KB_PAYWALL_ASK)
         return
-    await state.set_state(Ask.waiting)
-    await msg.answer(
-        f"✍️ Напиши свой вопрос одним сообщением\n"
-        f"Осталось вопросов: {left}"
-    )
+    await prompt_custom_question(msg, state, tid(msg))
 
 
 @router.message(StateFilter(None), F.text == BTN_HORO)
@@ -514,9 +528,18 @@ async def cb_question(cb: CallbackQuery) -> None:
         await cb.message.answer(f"Ошибка: {e}")
 
 
+@router.message(Ask.waiting, F.text == BTN_CANCEL)
+async def on_ask_cancel(msg: Message, state: FSMContext) -> None:
+    await state.clear()
+    left = custom_questions_left(get_user(tid(msg)))
+    note = f"\n\nНеиспользованных вопросов: {left}." if left else ""
+    await msg.answer(f"Вопросы отложены.{note}", reply_markup=menu_for(tid(msg)))
+
+
 @router.message(Ask.waiting, F.text)
 async def on_ask_text(msg: Message, state: FSMContext) -> None:
-    u = get_user(tid(msg))
+    user_id = tid(msg)
+    u = get_user(user_id)
     if not can_ask_custom(u):
         await state.clear()
         await msg.answer(PAYWALL_ASK_TEXT, reply_markup=KB_PAYWALL_ASK)
@@ -525,20 +548,29 @@ async def on_ask_text(msg: Message, state: FSMContext) -> None:
     if len(q) < 3:
         await msg.answer("Вопрос подлиннее 🙂")
         return
-    await state.clear()
+
     await msg.answer("✍️ Ищу ответ…")
     try:
         text = await ask_ai(PROMPT_ANSWER, f"{q}\n\n{profile_text(u)}")
-        use_custom_question(tid(msg))
-        left = custom_questions_left(get_user(tid(msg)))
+        if not use_custom_question(user_id):
+            await state.clear()
+            await msg.answer(PAYWALL_ASK_TEXT, reply_markup=KB_PAYWALL_ASK)
+            return
+        left = custom_questions_left(get_user(user_id))
         await send_chunks(msg, text)
-        if left:
-            await msg.answer(f"Осталось вопросов: {left}")
+        if left > 0:
+            await msg.answer(f"Использовано. Осталось вопросов: {left}")
+            await prompt_custom_question(msg, state, user_id)
         else:
-            await msg.answer("Пакет вопросов закончился. Купи новый в ✍️ Задать вопрос.")
+            await state.clear()
+            await msg.answer(
+                "✨ Пакет вопросов использован.\n"
+                "Чтобы задать ещё — купи новый пакет в ✍️ Задать вопрос.",
+                reply_markup=menu_for(user_id),
+            )
     except Exception as e:
-        await msg.answer(f"Ошибка: {e}")
-    await show_menu(msg, tid(msg))
+        await msg.answer(f"Ошибка: {e}\nПопробуй написать вопрос ещё раз.")
+        await prompt_custom_question(msg, state, user_id)
 
 
 @router.message(Partner.name, F.text)

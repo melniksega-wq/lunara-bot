@@ -18,6 +18,11 @@ KB_TIME = ReplyKeyboardMarkup(
     one_time_keyboard=True,
 )
 
+KB_ASK = ReplyKeyboardMarkup(
+    keyboard=[[KeyboardButton(text=BTN_CANCEL)]],
+    resize_keyboard=True,
+)
+
 # Меню
 BTN_CHART = "🌙 Моя карта"
 BTN_PREMIUM = "💎 Premium"
