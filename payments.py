@@ -50,7 +50,13 @@ class InvoiceProduct:
 
     @property
     def amount_kop(self) -> int:
-        return self.price_rub * 100
+        return int(self.price_rub) * 100
+
+    @property
+    def amount_rub_str(self) -> str:
+        """Сумма в рублях для чека ЮKassa (должна совпадать с amount в prices)."""
+        kop = self.amount_kop
+        return f"{kop // 100}.{(kop % 100):02d}"
 
 
 PRODUCTS: dict[str, InvoiceProduct] = {
@@ -58,7 +64,7 @@ PRODUCTS: dict[str, InvoiceProduct] = {
         key="premium",
         title="Lunara Premium",
         description="Полный анализ натальной карты, цифровой контент в боте",
-        label="Premium · натальная карта",
+        label="Premium - натальная карта",
         price_rub=PRICES["premium"],
         record_type="premium",
     ),
@@ -90,7 +96,7 @@ PRODUCTS: dict[str, InvoiceProduct] = {
         key="horo_week",
         title="Прогнозы на 7 дней",
         description="Ежедневная доставка в боте",
-        label="Прогнозы · 7 дней",
+        label="Прогнозы - 7 дней",
         price_rub=PRICES["horo_week"],
         record_type="horo_week",
     ),
@@ -98,7 +104,7 @@ PRODUCTS: dict[str, InvoiceProduct] = {
         key="horo_month",
         title="Прогнозы на 30 дней",
         description="Ежедневная доставка в боте",
-        label="Прогнозы · 30 дней",
+        label="Прогнозы - 30 дней",
         price_rub=PRICES["horo_month"],
         record_type="horo_month",
     ),
@@ -132,7 +138,8 @@ def parse_payload(payload: str) -> tuple[int, int, str] | None:
 
 
 def build_provider_data(product: InvoiceProduct) -> str:
-    value = f"{product.price_rub:.2f}"
+    """Чек 54-ФЗ для ЮKassa (сумма в рублях = prices / 100)."""
+    value = product.amount_rub_str
     receipt = {
         "receipt": {
             "items": [
@@ -140,7 +147,7 @@ def build_provider_data(product: InvoiceProduct) -> str:
                     "description": product.title[:128],
                     "quantity": "1.00",
                     "amount": {"value": value, "currency": "RUB"},
-                    "vat_code": YOOKASSA_VAT_CODE,
+                    "vat_code": int(YOOKASSA_VAT_CODE),
                     "payment_mode": "full_payment",
                     "payment_subject": "service",
                 }
@@ -164,27 +171,51 @@ async def send_payment_invoice(
         return
 
     payload = build_payload(cb.from_user.id, chart["id"], product_key)
+    amount_kop = product.amount_kop
+    if amount_kop < 100:
+        await cb.answer("Сумма слишком мала для оплаты", show_alert=True)
+        return
+
+    invoice_kwargs = dict(
+        chat_id=cb.message.chat.id,
+        title=product.title[:32],
+        description=product.description[:255],
+        payload=payload,
+        provider_token=YOOKASSA_PROVIDER_TOKEN,
+        currency="RUB",
+        prices=[LabeledPrice(label=product.label[:64], amount=amount_kop)],
+        need_email=True,
+        send_email_to_provider=True,
+        start_parameter="lunara",
+    )
     try:
         await cb.bot.send_invoice(
-            chat_id=cb.message.chat.id,
-            title=product.title,
-            description=product.description,
-            payload=payload,
-            provider_token=YOOKASSA_PROVIDER_TOKEN,
-            currency="RUB",
-            prices=[LabeledPrice(label=product.label, amount=product.amount_kop)],
+            **invoice_kwargs,
             provider_data=build_provider_data(product),
-            need_email=True,
-            send_email_to_provider=True,
         )
         await cb.answer()
     except Exception as e:
-        log.exception("send_invoice %s", product_key)
+        err = str(e)
+        log.exception(
+            "send_invoice %s amount_kop=%s rub=%s",
+            product_key,
+            amount_kop,
+            product.amount_rub_str,
+        )
+        if "CURRENCY_TOTAL_AMOUNT_INVALID" in err:
+            try:
+                await cb.bot.send_invoice(**invoice_kwargs)
+                await cb.answer()
+                return
+            except Exception as e2:
+                err = str(e2)
+                log.exception("send_invoice without receipt failed")
         await cb.answer("Не удалось выставить счёт", show_alert=True)
         await cb.message.answer(
-            "Не удалось открыть оплату. Проверьте, что бот подключён к ЮKassa "
-            "в @BotFather → Payments → ЮKassa.\n\n"
-            f"Технически: {e}"
+            "Не удалось открыть оплату.\n\n"
+            f"Товар: {product.title}\n"
+            f"Сумма: {product.amount_rub_str} ₽ ({amount_kop} коп.)\n\n"
+            f"Ошибка: {err}"
         )
 
 
