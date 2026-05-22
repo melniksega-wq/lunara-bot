@@ -38,7 +38,7 @@ from database import (
 )
 from horo_scheduler import send_daily_horo
 from paywalls import PRICES
-from yookassa_client import create_payment, get_payment
+from yookassa_client import YooKassaAPIError, create_payment, get_payment
 
 log = logging.getLogger(__name__)
 router = Router()
@@ -333,14 +333,27 @@ async def send_yookassa_payment_link(
             chart_id=chart_id,
             product_key=product_key,
         )
+    except YooKassaAPIError as e:
+        log.error("yookassa api: %s", e)
+        hint = ""
+        if "receipt" in str(e).lower():
+            hint = (
+                "\n\n💡 В ЛК ЮKassa: Настройки чеков → схема "
+                "«Платёж и чек одновременно», либо оставь "
+                "YOOKASSA_SEND_RECEIPT пустым (чек отдельно)."
+            )
+        elif e.status in (401, 403):
+            hint = "\n\n💡 Проверь YOOKASSA_SHOP_ID и YOOKASSA_SECRET_KEY."
+        await cb.answer("Ошибка ЮKassa", show_alert=True)
+        await cb.message.answer(
+            f"Не удалось создать платёж.\n\n"
+            f"ЮKassa: {e}{hint}"
+        )
+        return
     except Exception as e:
         log.exception("create yookassa payment")
         await cb.answer("Ошибка создания платежа", show_alert=True)
-        await cb.message.answer(
-            f"Не удалось создать платёж.\n\n"
-            f"Проверь YOOKASSA_SHOP_ID и YOOKASSA_SECRET_KEY в Railway.\n\n"
-            f"Ошибка: {e}"
-        )
+        await cb.message.answer(f"Не удалось создать платёж.\n\nОшибка: {e}")
         return
 
     yk_id = payment.get("id", "")

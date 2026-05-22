@@ -33,6 +33,9 @@ YOOKASSA_VAT_CODE = int(env("YOOKASSA_VAT_CODE") or "1")
 _tax = env("YOOKASSA_TAX_SYSTEM_CODE")
 YOOKASSA_TAX_SYSTEM_CODE = int(_tax) if _tax.isdigit() else None
 
+# 1 = отправлять receipt в запросе оплаты (нужна схема «Платёж и чек одновременно» в ЛК ЮKassa)
+YOOKASSA_SEND_RECEIPT = env("YOOKASSA_SEND_RECEIPT").lower() in ("1", "true", "yes")
+
 ADMIN_IDS = {510559563}
 
 
@@ -41,11 +44,11 @@ def payments_enabled() -> bool:
 
 
 def yookassa_return_url(order_id: int) -> str:
-    if BOT_USERNAME:
-        return f"https://t.me/{BOT_USERNAME}?start=paid_{order_id}"
     if PUBLIC_BASE_URL:
         return f"{PUBLIC_BASE_URL}/payment/return?order={order_id}"
-    return "https://t.me/"
+    if BOT_USERNAME:
+        return f"https://t.me/{BOT_USERNAME}?start=paid_{order_id}"
+    return "https://yookassa.ru/"
 
 
 def yookassa_webhook_url() -> str:
