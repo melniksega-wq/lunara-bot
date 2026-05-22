@@ -1,7 +1,7 @@
 """
 Paywall-экраны Lunara (ЮKassa / Telegram Payments).
 
-callback_data → счёт ЮKassa (sendInvoice) или тест без YOOKASSA_PROVIDER_TOKEN:
+callback_data → оплата ЮKassa API (ссылка) или тест без YOOKASSA_SHOP_ID/SECRET_KEY:
   pay:premium      → premium_249
   pay:ask:3        → ask_3_99
   pay:ask:10       → ask_10_249

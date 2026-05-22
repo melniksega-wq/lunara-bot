@@ -53,7 +53,11 @@ from keyboards import (
 )
 from analytics import record_purchase
 from config import admin_ids, payments_enabled
-from payments import product_key_from_callback, send_payment_invoice
+from payments import (
+    handle_paid_deeplink,
+    product_key_from_callback,
+    send_yookassa_payment_link,
+)
 from paywalls import PRICES, send_paywall_ask, send_paywall_horo, send_paywall_premium
 from services import (
     PROMPT_ANSWER,
@@ -263,6 +267,15 @@ async def finish_onboarding(msg: Message, state: FSMContext, place: str) -> None
 async def start(msg: Message, state: FSMContext) -> None:
     await state.clear()
     user_id = tid(msg)
+    args = (msg.text or "").split(maxsplit=1)
+    if len(args) > 1 and args[1].startswith("paid_"):
+        try:
+            order_id = int(args[1][5:])
+        except ValueError:
+            order_id = 0
+        if order_id:
+            await handle_paid_deeplink(msg, state, order_id)
+            return
     chart = get_active_chart(user_id)
     if chart:
         await msg.answer(
@@ -374,7 +387,7 @@ async def on_pay(cb: CallbackQuery, state: FSMContext) -> None:
         return
 
     if payments_enabled():
-        await send_payment_invoice(cb, chart, product_key)
+        await send_yookassa_payment_link(cb, chart, product_key)
         return
 
     parts = cb.data.split(":")

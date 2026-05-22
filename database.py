@@ -202,6 +202,24 @@ def init_db() -> None:
                 "WHERE created_at IS NULL OR created_at = ''",
                 (now,),
             )
+        c.execute(
+            """
+            CREATE TABLE IF NOT EXISTS pending_payments (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                yookassa_id TEXT NOT NULL UNIQUE,
+                user_id INTEGER NOT NULL,
+                chart_id INTEGER NOT NULL,
+                product_key TEXT NOT NULL,
+                amount_rub INTEGER NOT NULL,
+                status TEXT NOT NULL DEFAULT 'pending',
+                fulfilled INTEGER NOT NULL DEFAULT 0,
+                created_at TEXT NOT NULL
+            )
+            """
+        )
+        c.execute(
+            "CREATE INDEX IF NOT EXISTS idx_pending_yk ON pending_payments(yookassa_id)"
+        )
         from analytics import init_analytics_tables
 
         init_analytics_tables(c)
@@ -427,6 +445,76 @@ def horo_period_total(chart: dict) -> int:
     if chart.get("horoscope_type") == "month":
         return 30
     return 1
+
+
+def create_pending_payment(
+    yookassa_id: str,
+    user_id: int,
+    chart_id: int,
+    product_key: str,
+    amount_rub: int,
+) -> int:
+    with sqlite3.connect(DB) as c:
+        cur = c.execute(
+            """
+            INSERT INTO pending_payments (
+                yookassa_id, user_id, chart_id, product_key, amount_rub, created_at
+            ) VALUES (?, ?, ?, ?, ?, ?)
+            """,
+            (yookassa_id, user_id, chart_id, product_key, amount_rub, _now()),
+        )
+        c.commit()
+        return int(cur.lastrowid)
+
+
+def get_pending_by_id(order_id: int) -> dict | None:
+    with sqlite3.connect(DB) as c:
+        c.row_factory = sqlite3.Row
+        row = c.execute(
+            "SELECT * FROM pending_payments WHERE id=?", (order_id,)
+        ).fetchone()
+    return dict(row) if row else None
+
+
+def get_pending_by_yookassa_id(yookassa_id: str) -> dict | None:
+    with sqlite3.connect(DB) as c:
+        c.row_factory = sqlite3.Row
+        row = c.execute(
+            "SELECT * FROM pending_payments WHERE yookassa_id=?", (yookassa_id,)
+        ).fetchone()
+    return dict(row) if row else None
+
+
+def update_pending_status(order_id: int, status: str) -> None:
+    with sqlite3.connect(DB) as c:
+        c.execute(
+            "UPDATE pending_payments SET status=? WHERE id=?",
+            (status, order_id),
+        )
+        c.commit()
+
+
+def update_pending_yookassa_id(order_id: int, yookassa_id: str) -> None:
+    with sqlite3.connect(DB) as c:
+        c.execute(
+            "UPDATE pending_payments SET yookassa_id=? WHERE id=?",
+            (yookassa_id, order_id),
+        )
+        c.commit()
+
+
+def mark_pending_fulfilled(order_id: int) -> bool:
+    with sqlite3.connect(DB) as c:
+        cur = c.execute(
+            """
+            UPDATE pending_payments
+            SET fulfilled=1, status='succeeded'
+            WHERE id=? AND fulfilled=0
+            """,
+            (order_id,),
+        )
+        c.commit()
+        return cur.rowcount > 0
 
 
 def horo_current_day(chart: dict) -> int:

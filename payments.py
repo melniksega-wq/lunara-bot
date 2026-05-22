@@ -1,39 +1,44 @@
 """
-Оплата через ЮKassa (нативная интеграция Telegram Payments).
+Оплата через REST API ЮKassa (redirect + webhook).
 
-Документация: sendInvoice + provider_token + provider_data (чек 54-ФЗ).
-После оплаты Telegram присылает SuccessfulPayment (без webhook ЮKassa).
+Не использует Telegram Payments API (sendInvoice).
 """
 
 from __future__ import annotations
 
-import json
 import logging
 from dataclasses import dataclass
 
 from aiogram import F, Router
 from aiogram.fsm.context import FSMContext
+from aiogram.fsm.storage.base import StorageKey
 from aiogram.types import (
     CallbackQuery,
-    LabeledPrice,
+    InlineKeyboardButton,
+    InlineKeyboardMarkup,
     Message,
-    PreCheckoutQuery,
 )
+from aiogram import Bot, Dispatcher
 
 from analytics import record_purchase
-from config import (
-    YOOKASSA_PROVIDER_TOKEN,
-    YOOKASSA_VAT_CODE,
-    payments_enabled,
-)
+from config import payments_enabled
+import uuid
+
 from database import (
     add_chart_questions,
+    create_pending_payment,
     get_chart,
+    get_pending_by_id,
+    get_pending_by_yookassa_id,
     grant_chart_horo,
+    mark_pending_fulfilled,
     set_chart_premium,
+    update_pending_status,
+    update_pending_yookassa_id,
 )
 from horo_scheduler import send_daily_horo
 from paywalls import PRICES
+from yookassa_client import create_payment, get_payment
 
 log = logging.getLogger(__name__)
 router = Router()
@@ -44,18 +49,12 @@ class InvoiceProduct:
     key: str
     title: str
     description: str
-    label: str
     price_rub: int
     record_type: str
 
     @property
-    def amount_kop(self) -> int:
-        return int(self.price_rub) * 100
-
-    @property
     def amount_rub_str(self) -> str:
-        """Сумма в рублях для чека ЮKassa (должна совпадать с amount в prices)."""
-        kop = self.amount_kop
+        kop = int(self.price_rub) * 100
         return f"{kop // 100}.{(kop % 100):02d}"
 
 
@@ -64,7 +63,6 @@ PRODUCTS: dict[str, InvoiceProduct] = {
         key="premium",
         title="Lunara Premium",
         description="Полный анализ натальной карты, цифровой контент в боте",
-        label="Premium - натальная карта",
         price_rub=PRICES["premium"],
         record_type="premium",
     ),
@@ -72,7 +70,6 @@ PRODUCTS: dict[str, InvoiceProduct] = {
         key="ask_3",
         title="3 персональных вопроса",
         description="Цифровая услуга в Telegram-боте Lunara",
-        label="3 вопроса к карте",
         price_rub=PRICES["ask_3"],
         record_type="ask_3",
     ),
@@ -80,7 +77,6 @@ PRODUCTS: dict[str, InvoiceProduct] = {
         key="ask_10",
         title="10 персональных вопросов",
         description="Цифровая услуга в Telegram-боте Lunara",
-        label="10 вопросов к карте",
         price_rub=PRICES["ask_10"],
         record_type="ask_10",
     ),
@@ -88,7 +84,6 @@ PRODUCTS: dict[str, InvoiceProduct] = {
         key="horo_today",
         title="Прогноз на сегодня",
         description="Персональный прогноз, цифровой контент",
-        label="Прогноз на сегодня",
         price_rub=PRICES["horo_today"],
         record_type="horo_today",
     ),
@@ -96,7 +91,6 @@ PRODUCTS: dict[str, InvoiceProduct] = {
         key="horo_week",
         title="Прогнозы на 7 дней",
         description="Ежедневная доставка в боте",
-        label="Прогнозы - 7 дней",
         price_rub=PRICES["horo_week"],
         record_type="horo_week",
     ),
@@ -104,7 +98,6 @@ PRODUCTS: dict[str, InvoiceProduct] = {
         key="horo_month",
         title="Прогнозы на 30 дней",
         description="Ежедневная доставка в боте",
-        label="Прогнозы - 30 дней",
         price_rub=PRICES["horo_month"],
         record_type="horo_month",
     ),
@@ -113,128 +106,30 @@ PRODUCTS: dict[str, InvoiceProduct] = {
 
 def product_key_from_callback(data: str) -> str | None:
     parts = data.split(":")
-    if len(parts) < 2 or parts[0] != "pay":
+    if len(parts) < 2:
         return None
-    if parts[1] == "premium":
-        return "premium"
-    if parts[1] == "ask" and len(parts) == 3:
-        return f"ask_{parts[2]}"
-    if parts[1] == "horo" and len(parts) == 3:
-        return f"horo_{parts[2]}"
+    if parts[0] == "pay":
+        if parts[1] == "premium":
+            return "premium"
+        if parts[1] == "ask" and len(parts) == 3:
+            return f"ask_{parts[2]}"
+        if parts[1] == "horo" and len(parts) == 3:
+            return f"horo_{parts[2]}"
+    if parts[0] == "paycheck" and len(parts) == 2 and parts[1].isdigit():
+        return None
     return None
 
 
-def build_payload(user_id: int, chart_id: int, product_key: str) -> str:
-    """До 128 байт для invoice_payload."""
-    return f"{user_id}:{chart_id}:{product_key}"
+def paycheck_order_id(data: str) -> int | None:
+    parts = data.split(":")
+    if parts[0] == "paycheck" and len(parts) == 2 and parts[1].isdigit():
+        return int(parts[1])
+    return None
 
 
-def parse_payload(payload: str) -> tuple[int, int, str] | None:
-    try:
-        uid_s, cid_s, key = payload.split(":", 2)
-        return int(uid_s), int(cid_s), key
-    except (ValueError, AttributeError):
-        return None
-
-
-def build_provider_data(product: InvoiceProduct) -> str:
-    """Чек 54-ФЗ для ЮKassa (сумма в рублях = prices / 100)."""
-    value = product.amount_rub_str
-    receipt = {
-        "receipt": {
-            "items": [
-                {
-                    "description": product.title[:128],
-                    "quantity": "1.00",
-                    "amount": {"value": value, "currency": "RUB"},
-                    "vat_code": int(YOOKASSA_VAT_CODE),
-                    "payment_mode": "full_payment",
-                    "payment_subject": "service",
-                }
-            ]
-        }
-    }
-    return json.dumps(receipt, ensure_ascii=False)
-
-
-async def send_payment_invoice(
-    cb: CallbackQuery,
-    chart: dict,
-    product_key: str,
-) -> None:
-    product = PRODUCTS.get(product_key)
-    if not product:
-        await cb.answer("Товар не найден", show_alert=True)
-        return
-    if not cb.message:
-        await cb.answer("Ошибка чата", show_alert=True)
-        return
-
-    payload = build_payload(cb.from_user.id, chart["id"], product_key)
-    amount_kop = product.amount_kop
-    if amount_kop < 100:
-        await cb.answer("Сумма слишком мала для оплаты", show_alert=True)
-        return
-
-    invoice_kwargs = dict(
-        chat_id=cb.message.chat.id,
-        title=product.title[:32],
-        description=product.description[:255],
-        payload=payload,
-        provider_token=YOOKASSA_PROVIDER_TOKEN,
-        currency="RUB",
-        prices=[LabeledPrice(label=product.label[:64], amount=amount_kop)],
-        need_email=True,
-        send_email_to_provider=True,
-        start_parameter="lunara",
-    )
-    try:
-        await cb.bot.send_invoice(
-            **invoice_kwargs,
-            provider_data=build_provider_data(product),
-        )
-        await cb.answer()
-    except Exception as e:
-        err = str(e)
-        log.exception(
-            "send_invoice %s amount_kop=%s rub=%s",
-            product_key,
-            amount_kop,
-            product.amount_rub_str,
-        )
-        if "CURRENCY_TOTAL_AMOUNT_INVALID" in err:
-            try:
-                await cb.bot.send_invoice(**invoice_kwargs)
-                await cb.answer()
-                return
-            except Exception as e2:
-                err = str(e2)
-                log.exception("send_invoice without receipt failed")
-        await cb.answer("Не удалось выставить счёт", show_alert=True)
-        await cb.message.answer(
-            "Не удалось открыть оплату.\n\n"
-            f"Товар: {product.title}\n"
-            f"Сумма: {product.amount_rub_str} ₽ ({amount_kop} коп.)\n\n"
-            f"Ошибка: {err}"
-        )
-
-
-def validate_pre_checkout(query: PreCheckoutQuery) -> tuple[bool, str | None]:
-    parsed = parse_payload(query.invoice_payload or "")
-    if not parsed:
-        return False, "Некорректный заказ"
-    user_id, chart_id, product_key = parsed
-    if query.from_user.id != user_id:
-        return False, "Заказ привязан к другому пользователю"
-    if product_key not in PRODUCTS:
-        return False, "Товар недоступен"
-    product = PRODUCTS[product_key]
-    if query.total_amount != product.amount_kop:
-        return False, "Сумма заказа изменилась"
-    chart = get_chart(chart_id, user_id)
-    if not chart:
-        return False, "Карта не найдена"
-    return True, None
+def _fsm_context(dp: Dispatcher, bot: Bot, user_id: int) -> FSMContext:
+    key = StorageKey(bot_id=bot.id, chat_id=user_id, user_id=user_id)
+    return FSMContext(storage=dp.storage, key=key)
 
 
 async def fulfill_order(
@@ -283,9 +178,7 @@ async def fulfill_order(
         add_chart_questions(chart_id, 3)
         chart = get_chart(chart_id, user_id)
         left = question_balance(chart) if chart else 0
-        await message.answer(
-            f"✍️ +3 вопроса для «{cname}»\nОсталось: {left}"
-        )
+        await message.answer(f"✍️ +3 вопроса для «{cname}»\nОсталось: {left}")
         await prompt_custom_question(message, state, user_id)
         return
 
@@ -293,9 +186,7 @@ async def fulfill_order(
         add_chart_questions(chart_id, 10)
         chart = get_chart(chart_id, user_id)
         left = question_balance(chart) if chart else 0
-        await message.answer(
-            f"✍️ +10 вопросов для «{cname}»\nОсталось: {left}"
-        )
+        await message.answer(f"✍️ +10 вопросов для «{cname}»\nОсталось: {left}")
         await prompt_custom_question(message, state, user_id)
         return
 
@@ -327,28 +218,185 @@ async def fulfill_order(
     log.warning("unhandled product %s payment %s", product_key, provider_payment_id)
 
 
-@router.pre_checkout_query()
-async def on_pre_checkout(query: PreCheckoutQuery) -> None:
-    ok, err = validate_pre_checkout(query)
-    await query.answer(ok=ok, error_message=err)
-
-
-@router.message(F.successful_payment)
-async def on_successful_payment(message: Message, state: FSMContext) -> None:
-    sp = message.successful_payment
-    parsed = parse_payload(sp.invoice_payload)
-    if not parsed:
-        await message.answer("Оплата получена, но заказ не распознан. Напиши в поддержку.")
+async def process_payment_object(
+    bot: Bot,
+    dp: Dispatcher,
+    payment_obj: dict,
+) -> None:
+    yk_id = payment_obj.get("id", "")
+    status = payment_obj.get("status", "")
+    if not yk_id:
         return
-    user_id, chart_id, product_key = parsed
-    if message.from_user and message.from_user.id != user_id:
-        await message.answer("Ошибка привязки платежа. Напиши в поддержку.")
+
+    pending = get_pending_by_yookassa_id(yk_id)
+    if not pending:
+        meta = payment_obj.get("metadata") or {}
+        try:
+            order_id = int(meta.get("order_id", 0))
+        except (TypeError, ValueError):
+            order_id = 0
+        if order_id:
+            pending = get_pending_by_id(order_id)
+    if not pending:
+        log.warning("pending payment not found for %s", yk_id)
         return
+
+    update_pending_status(pending["id"], status)
+    if status not in ("succeeded", "waiting_for_capture"):
+        return
+    if pending.get("fulfilled"):
+        return
+    if not mark_pending_fulfilled(pending["id"]):
+        return
+
+    user_id = int(pending["user_id"])
+    chart_id = int(pending["chart_id"])
+    product_key = pending["product_key"]
+
+    msg = await bot.send_message(user_id, "✅ Оплата получена, открываю доступ…")
+    state = _fsm_context(dp, bot, user_id)
     await fulfill_order(
-        message,
+        msg,
         state,
         user_id,
         chart_id,
         product_key,
-        provider_payment_id=sp.provider_payment_charge_id or "",
+        provider_payment_id=yk_id,
     )
+
+
+async def try_complete_order(
+    bot: Bot,
+    dp: Dispatcher,
+    chat_id: int,
+    order_id: int,
+) -> None:
+    pending = get_pending_by_id(order_id)
+    if not pending:
+        await bot.send_message(chat_id, "Заказ не найден.")
+        return
+    if pending.get("fulfilled"):
+        await bot.send_message(chat_id, "Этот заказ уже выполнен ✨")
+        return
+
+    try:
+        payment = await get_payment(pending["yookassa_id"])
+    except Exception as e:
+        log.exception("get_payment %s", order_id)
+        await bot.send_message(chat_id, f"Не удалось проверить оплату: {e}")
+        return
+
+    status = payment.get("status", "")
+    if status == "succeeded":
+        await process_payment_object(bot, dp, payment)
+        return
+    if status == "pending":
+        await bot.send_message(
+            chat_id,
+            "Оплата ещё не завершена. Заверши платёж на странице ЮKassa "
+            "или подожди минуту и нажми «Проверить оплату» снова.",
+        )
+        return
+    if status == "canceled":
+        await bot.send_message(chat_id, "Платёж отменён. Можно создать новый счёт.")
+        return
+    await bot.send_message(chat_id, f"Статус платежа: {status}")
+
+
+async def send_yookassa_payment_link(
+    cb: CallbackQuery,
+    chart: dict,
+    product_key: str,
+) -> None:
+    product = PRODUCTS.get(product_key)
+    if not product or not cb.message:
+        await cb.answer("Товар не найден", show_alert=True)
+        return
+
+    user_id = cb.from_user.id
+    chart_id = int(chart["id"])
+
+    try:
+        order_id = create_pending_payment(
+            yookassa_id=f"tmp_{uuid.uuid4().hex}",
+            user_id=user_id,
+            chart_id=chart_id,
+            product_key=product_key,
+            amount_rub=product.price_rub,
+        )
+        payment = await create_payment(
+            amount_rub_str=product.amount_rub_str,
+            description=product.description,
+            product_title=product.title,
+            order_id=order_id,
+            user_id=user_id,
+            chart_id=chart_id,
+            product_key=product_key,
+        )
+    except Exception as e:
+        log.exception("create yookassa payment")
+        await cb.answer("Ошибка создания платежа", show_alert=True)
+        await cb.message.answer(
+            f"Не удалось создать платёж.\n\n"
+            f"Проверь YOOKASSA_SHOP_ID и YOOKASSA_SECRET_KEY в Railway.\n\n"
+            f"Ошибка: {e}"
+        )
+        return
+
+    yk_id = payment.get("id", "")
+    confirm = payment.get("confirmation") or {}
+    pay_url = confirm.get("confirmation_url", "")
+    if not yk_id or not pay_url:
+        await cb.message.answer("ЮKassa не вернула ссылку на оплату.")
+        return
+
+    update_pending_yookassa_id(order_id, yk_id)
+
+    kb = InlineKeyboardMarkup(
+        inline_keyboard=[
+            [InlineKeyboardButton(text="💳 Перейти к оплате", url=pay_url)],
+            [
+                InlineKeyboardButton(
+                    text="✅ Проверить оплату",
+                    callback_data=f"paycheck:{order_id}",
+                )
+            ],
+        ]
+    )
+    await cb.message.answer(
+        f"💳 *{product.title}*\n\n"
+        f"Сумма: *{product.amount_rub_str} ₽*\n\n"
+        "Оплата на защищённой странице ЮKassa "
+        "(карта, SberPay, ЮMoney и др.).\n\n"
+        "После оплаты доступ откроется автоматически. "
+        "Если не открылся — нажми «Проверить оплату».",
+        reply_markup=kb,
+        parse_mode="Markdown",
+    )
+    await cb.answer()
+
+
+@router.callback_query(F.data.startswith("paycheck:"))
+async def on_paycheck(cb: CallbackQuery) -> None:
+    order_id = paycheck_order_id(cb.data)
+    if not order_id or not cb.message:
+        await cb.answer()
+        return
+    await cb.answer("Проверяю…")
+    dp = getattr(cb.bot, "_lunara_dp", None)
+    if not dp:
+        await cb.message.answer("Внутренняя ошибка: перезапусти бота.")
+        return
+    await try_complete_order(cb.bot, dp, cb.message.chat.id, order_id)
+
+
+async def handle_paid_deeplink(
+    msg: Message,
+    state: FSMContext,
+    order_id: int,
+) -> None:
+    dp = getattr(msg.bot, "_lunara_dp", None)
+    if not dp:
+        await msg.answer("Перезапусти бота и попробуй снова.")
+        return
+    await try_complete_order(msg.bot, dp, msg.chat.id, order_id)
