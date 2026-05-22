@@ -34,6 +34,19 @@ BTN_QUESTIONS = "🔮 Вопросы"
 BTN_ASK = "✍️ Задать вопрос"
 BTN_HORO = "📅 Гороскопы"
 
+SUPPORT_URL = "https://t.me/sup_lunara"
+
+KB_SUPPORT = InlineKeyboardMarkup(
+    inline_keyboard=[
+        [
+            InlineKeyboardButton(
+                text="✉️ Написать в поддержку",
+                url=SUPPORT_URL,
+            )
+        ],
+    ]
+)
+
 
 def _btn(text: str) -> KeyboardButton:
     return KeyboardButton(text=text)

@@ -45,6 +45,7 @@ from keyboards import (
     KB_ASK,
     KB_ONBOARD,
     KB_POPULAR,
+    KB_SUPPORT,
     KB_TIME,
     POPULAR,
     charts_list_kb,
@@ -529,8 +530,13 @@ async def m_premium(msg: Message) -> None:
 @router.message(StateFilter(None), F.text == BTN_SUPPORT)
 async def m_support(msg: Message) -> None:
     await msg.answer(
-        "💬 Поддержка Lunara\n\n"
-        "Напиши сюда свой вопрос — поможем с доступом и оплатой."
+        "💬 <b>Поддержка Lunara</b>\n\n"
+        "Если у вас возникли вопросы по работе сервиса, "
+        "оплате или доступу к функциям — напишите в поддержку:\n\n"
+        '👉 <a href="https://t.me/sup_lunara">@sup_lunara</a>\n\n'
+        "Мы постараемся ответить как можно быстрее ✨",
+        reply_markup=KB_SUPPORT,
+        parse_mode="HTML",
     )
 
 
