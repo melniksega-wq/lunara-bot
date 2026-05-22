@@ -52,7 +52,8 @@ from keyboards import (
     menu_kb,
 )
 from analytics import record_purchase
-from config import admin_ids
+from config import admin_ids, payments_enabled
+from payments import product_key_from_callback, send_payment_invoice
 from paywalls import PRICES, send_paywall_ask, send_paywall_horo, send_paywall_premium
 from services import (
     PROMPT_ANSWER,
@@ -353,7 +354,7 @@ async def on_place(msg: Message, state: FSMContext) -> None:
     await finish_onboarding(msg, state, place)
 
 
-# ─── Оплата (тест) ────────────────────────────────────────────────────
+# ─── Оплата (ЮKassa / Telegram Payments) ──────────────────────────────
 
 
 @router.callback_query(F.data.startswith("pay:"))
@@ -365,6 +366,15 @@ async def on_pay(cb: CallbackQuery, state: FSMContext) -> None:
     chart = get_active_chart(user_id)
     if not chart:
         await cb.answer("Выбери активную карту", show_alert=True)
+        return
+
+    product_key = product_key_from_callback(cb.data)
+    if not product_key:
+        await cb.answer("Неизвестный товар", show_alert=True)
+        return
+
+    if payments_enabled():
+        await send_payment_invoice(cb, chart, product_key)
         return
 
     parts = cb.data.split(":")
