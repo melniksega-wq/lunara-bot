@@ -30,22 +30,24 @@ class Health(BaseHTTPRequestHandler):
         pass
 
 
-def run_health():
-    port = int(os.getenv("PORT", 8080))
-    HTTPServer(("0.0.0.0", port), Health).serve_forever()
+def run_health() -> None:
+    port = int(os.getenv("PORT", "8080"))
+    server = HTTPServer(("0.0.0.0", port), Health)
+    logging.info("Healthcheck HTTP on 0.0.0.0:%s", port)
+    server.serve_forever()
 
 
-async def main():
-    logging.basicConfig(
-        level=logging.INFO,
-        format="%(asctime)s %(levelname)s %(message)s",
-    )
+def start_health_server() -> None:
+    thread = threading.Thread(target=run_health, daemon=True, name="health")
+    thread.start()
+
+
+async def main() -> None:
     if not BOT_TOKEN or not OPENAI_API_KEY:
         logging.error("Задай BOT_TOKEN и OPENAI_API_KEY в Railway Variables")
         sys.exit(1)
     logging.info("Keys OK. Admin IDs: %s", admin_ids())
     init_db()
-    threading.Thread(target=run_health, daemon=True).start()
     bot = Bot(token=BOT_TOKEN)
     dp = Dispatcher(storage=MemoryStorage())
     dp.include_router(admin_router)
@@ -55,4 +57,9 @@ async def main():
 
 
 if __name__ == "__main__":
+    logging.basicConfig(
+        level=logging.INFO,
+        format="%(asctime)s %(levelname)s %(message)s",
+    )
+    start_health_server()
     asyncio.run(main())

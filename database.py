@@ -204,7 +204,7 @@ def init_db() -> None:
             )
         from analytics import init_analytics_tables
 
-        init_analytics_tables()
+        init_analytics_tables(c)
         c.commit()
 
 

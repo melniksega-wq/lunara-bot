@@ -15,8 +15,8 @@ def _today() -> str:
     return date.today().isoformat()
 
 
-def init_analytics_tables() -> None:
-    with sqlite3.connect(DB) as c:
+def init_analytics_tables(conn: sqlite3.Connection | None = None) -> None:
+    def _ddl(c: sqlite3.Connection) -> None:
         c.execute(
             """
             CREATE TABLE IF NOT EXISTS events (
@@ -53,6 +53,12 @@ def init_analytics_tables() -> None:
         c.execute(
             "CREATE INDEX IF NOT EXISTS idx_purchases_user ON purchases(user_id)"
         )
+
+    if conn is not None:
+        _ddl(conn)
+        return
+    with sqlite3.connect(DB, timeout=30) as c:
+        _ddl(c)
         c.commit()
 
 
