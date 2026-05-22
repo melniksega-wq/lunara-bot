@@ -184,7 +184,23 @@ def paywall_horo_kb(*, show_today_btn: bool = False) -> InlineKeyboardMarkup:
     return InlineKeyboardMarkup(inline_keyboard=rows)
 
 
+def _log_paywall(msg, event_type: str) -> None:
+    if not msg.from_user:
+        return
+    from analytics import log_event
+    from database import get_active_chart
+
+    uid = msg.from_user.id
+    chart = get_active_chart(uid)
+    log_event(
+        uid,
+        event_type,
+        chart_id=int(chart["id"]) if chart else None,
+    )
+
+
 async def send_paywall_premium(msg) -> None:
+    _log_paywall(msg, "paywall_premium")
     await msg.answer(
         paywall_premium_text(),
         reply_markup=paywall_premium_kb(),
@@ -193,6 +209,7 @@ async def send_paywall_premium(msg) -> None:
 
 
 async def send_paywall_ask(msg) -> None:
+    _log_paywall(msg, "paywall_ask")
     await msg.answer(
         paywall_ask_text(),
         reply_markup=paywall_ask_kb(),
@@ -201,6 +218,7 @@ async def send_paywall_ask(msg) -> None:
 
 
 async def send_paywall_horo(msg, *, extra: str = "", show_today_btn: bool = False) -> None:
+    _log_paywall(msg, "paywall_horo")
     await msg.answer(
         paywall_horo_text(extra),
         reply_markup=paywall_horo_kb(show_today_btn=show_today_btn),

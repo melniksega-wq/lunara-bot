@@ -15,3 +15,7 @@ class Partner(StatesGroup):
 
 class Ask(StatesGroup):
     waiting = State()
+
+
+class AdminBroadcast(StatesGroup):
+    waiting = State()

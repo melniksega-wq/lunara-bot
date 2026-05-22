@@ -51,7 +51,9 @@ from keyboards import (
     charts_list_kb,
     menu_kb,
 )
-from paywalls import send_paywall_ask, send_paywall_horo, send_paywall_premium
+from analytics import record_purchase
+from config import admin_ids
+from paywalls import PRICES, send_paywall_ask, send_paywall_horo, send_paywall_premium
 from services import (
     PROMPT_ANSWER,
     PROMPT_COMPAT,
@@ -108,7 +110,7 @@ def tid(msg: Message) -> int:
 
 def menu_for(user_id: int):
     chart = get_active_chart(user_id)
-    return menu_kb(has_premium(chart))
+    return menu_kb(has_premium(chart), show_admin=user_id in admin_ids())
 
 
 async def show_menu(msg: Message, user_id: int) -> None:
@@ -370,6 +372,7 @@ async def on_pay(cb: CallbackQuery, state: FSMContext) -> None:
     cname = chart["profile_name"]
 
     if parts[1] == "premium":
+        record_purchase(user_id, "premium", PRICES["premium"], chart_id=chart["id"])
         set_chart_premium(chart["id"], True)
         await cb.message.answer(
             f"💎 Premium для «{cname}» активирован.{TEST_NOTE}",
@@ -381,6 +384,14 @@ async def on_pay(cb: CallbackQuery, state: FSMContext) -> None:
 
     if parts[1] == "ask" and len(parts) == 3:
         count = int(parts[2])
+        if count == 3:
+            record_purchase(
+                user_id, "ask_3", PRICES["ask_3"], chart_id=chart["id"]
+            )
+        elif count == 10:
+            record_purchase(
+                user_id, "ask_10", PRICES["ask_10"], chart_id=chart["id"]
+            )
         add_chart_questions(chart["id"], count)
         chart = get_chart(chart["id"], user_id)
         left = question_balance(chart)
@@ -393,6 +404,11 @@ async def on_pay(cb: CallbackQuery, state: FSMContext) -> None:
 
     if parts[1] == "horo" and len(parts) == 3:
         kind = parts[2]
+        price_key = f"horo_{kind}"
+        if price_key in PRICES:
+            record_purchase(
+                user_id, price_key, PRICES[price_key], chart_id=chart["id"]
+            )
         if kind == "today":
             grant_chart_horo(chart["id"], "today", 1)
             await cb.message.answer(
@@ -718,7 +734,7 @@ async def p_date(msg: Message, state: FSMContext) -> None:
 
 @router.message(StateFilter(None), F.text)
 async def any_text(msg: Message) -> None:
-    if msg.text.startswith("/"):
+    if msg.text and msg.text.startswith("/"):
         return
     if is_profile_complete(tid(msg)):
         await msg.answer("Выбери кнопку в меню 👇", reply_markup=menu_for(tid(msg)))

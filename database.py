@@ -202,15 +202,18 @@ def init_db() -> None:
                 "WHERE created_at IS NULL OR created_at = ''",
                 (now,),
             )
+        from analytics import init_analytics_tables
+
+        init_analytics_tables()
         c.commit()
 
 
-def ensure_user(tid: int) -> None:
+def ensure_user(tid: int) -> bool:
     now = _now()
     with sqlite3.connect(DB) as c:
         cols = _users_columns(c)
         if c.execute("SELECT 1 FROM users WHERE telegram_id=?", (tid,)).fetchone():
-            return
+            return False
         stamps: dict = {"telegram_id": tid}
         for leg in ("name", "birth_date", "birth_time", "birth_place"):
             if leg in cols:
@@ -225,6 +228,10 @@ def ensure_user(tid: int) -> None:
             [stamps[k] for k in keys],
         )
         c.commit()
+    from analytics import log_event
+
+    log_event(tid, "registration")
+    return True
 
 
 def get_user(tid: int) -> dict | None:
@@ -309,6 +316,9 @@ def create_chart(
         c.commit()
     chart = get_chart(chart_id, tid)
     assert chart is not None
+    from analytics import log_event
+
+    log_event(tid, "chart_created", chart_id=chart_id)
     return chart
 
 

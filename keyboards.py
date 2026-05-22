@@ -33,6 +33,7 @@ BTN_COMPAT = "❤️ Совместимость"
 BTN_QUESTIONS = "🔮 Вопросы"
 BTN_ASK = "✍️ Задать вопрос"
 BTN_HORO = "📅 Гороскопы"
+BTN_ADMIN = "⚙️ Admin"
 
 SUPPORT_URL = "https://t.me/sup_lunara"
 
@@ -52,25 +53,28 @@ def _btn(text: str) -> KeyboardButton:
     return KeyboardButton(text=text)
 
 
-def menu_kb(is_premium: bool) -> ReplyKeyboardMarkup:
+def menu_kb(is_premium: bool, *, show_admin: bool = False) -> ReplyKeyboardMarkup:
     row_charts = [_btn(BTN_MY_CHARTS), _btn(BTN_NEW_CHART)]
+    admin_row = [[_btn(BTN_ADMIN)]] if show_admin else []
     if is_premium:
+        rows = [
+            row_charts,
+            [_btn(BTN_CHART), _btn(BTN_COMPAT)],
+            [_btn(BTN_QUESTIONS), _btn(BTN_ASK)],
+            [_btn(BTN_HORO), _btn(BTN_SUPPORT)],
+        ]
         return ReplyKeyboardMarkup(
-            keyboard=[
-                row_charts,
-                [_btn(BTN_CHART), _btn(BTN_COMPAT)],
-                [_btn(BTN_QUESTIONS), _btn(BTN_ASK)],
-                [_btn(BTN_HORO), _btn(BTN_SUPPORT)],
-            ],
+            keyboard=rows + admin_row,
             resize_keyboard=True,
         )
+    rows = [
+        row_charts,
+        [_btn(BTN_CHART), _btn(BTN_PREMIUM)],
+        [_btn(BTN_ASK), _btn(BTN_HORO)],
+        [_btn(BTN_SUPPORT)],
+    ]
     return ReplyKeyboardMarkup(
-        keyboard=[
-            row_charts,
-            [_btn(BTN_CHART), _btn(BTN_PREMIUM)],
-            [_btn(BTN_ASK), _btn(BTN_HORO)],
-            [_btn(BTN_SUPPORT)],
-        ],
+        keyboard=rows + admin_row,
         resize_keyboard=True,
     )
 
