@@ -59,11 +59,11 @@ from payments import (
     send_yookassa_payment_link,
 )
 from paywalls import PRICES, send_paywall_ask, send_paywall_horo, send_paywall_premium
+from premium_chart import deliver_premium_chart
 from services import (
     PROMPT_ANSWER,
     PROMPT_COMPAT,
     PROMPT_FREE,
-    PROMPT_FULL,
     PROMPT_HORO_TODAY,
     ask_ai,
     parse_date,
@@ -143,22 +143,7 @@ async def prompt_custom_question(
 
 
 async def deliver_full_chart(msg: Message, user_id: int) -> None:
-    chart = get_active_chart(user_id)
-    if not chart:
-        await msg.answer("Сначала выбери или создай карту в 📋 Все карты")
-        return
-    if chart.get("full_reading"):
-        await msg.answer(f"💎 Полная карта · {chart['profile_name']}\n")
-        await send_chunks(msg, chart["full_reading"])
-        return
-    await msg.answer("Создаю полную карту…")
-    try:
-        full = await ask_ai(PROMPT_FULL, "Данные:\n" + profile_text(chart))
-        save_chart_texts(chart["id"], full=full)
-        await msg.answer(f"💎 Полная карта · {chart['profile_name']}\n")
-        await send_chunks(msg, full)
-    except Exception as e:
-        await msg.answer(f"Ошибка: {e}")
+    await deliver_premium_chart(msg, user_id)
 
 
 async def deliver_today_horo(msg: Message, user_id: int) -> None:
@@ -248,8 +233,15 @@ async def finish_onboarding(msg: Message, state: FSMContext, place: str) -> None
     try:
         free = await ask_ai(PROMPT_FREE, "Данные:\n" + profile_text(chart))
         save_chart_texts(chart["id"], free=free)
-        await msg.answer("🎁 Бесплатный разбор\n")
+        await msg.answer("🎁 *Бесплатный мини-разбор*\n", parse_mode="Markdown")
         await send_chunks(msg, free)
+        await msg.answer(
+            "Это только краткий тизер.\n\n"
+            "💎 *Premium* — 12 глубоких разделов: личность, отношения, "
+            "деньги, карьера, скрытые стороны и персональное досье "
+            "на 10+ экранов текста.",
+            parse_mode="Markdown",
+        )
     except asyncio.TimeoutError:
         await msg.answer("Разбор занял слишком долго. Открой ✨ Текущая карта позже.")
     except Exception as e:
@@ -541,7 +533,7 @@ async def m_chart(msg: Message) -> None:
         parse_mode="Markdown",
     )
     if chart.get("free_reading"):
-        await msg.answer("🎁 Бесплатный разбор\n")
+        await msg.answer("🎁 *Бесплатный мини-разбор*\n", parse_mode="Markdown")
         await send_chunks(msg, chart["free_reading"])
     else:
         await msg.answer("Бесплатный разбор ещё не готов.")
@@ -560,8 +552,7 @@ async def m_premium(msg: Message) -> None:
         return
     if has_premium(chart):
         await msg.answer(f"💎 Premium для «{chart['profile_name']}» уже активен ✨")
-        if not chart.get("full_reading"):
-            await deliver_full_chart(msg, user_id)
+        await deliver_full_chart(msg, user_id)
         return
     await send_paywall_premium(msg)
 
