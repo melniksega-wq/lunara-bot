@@ -14,7 +14,8 @@ from analytics import (
     recent_purchases,
 )
 from config import admin_ids
-from keyboards import BTN_ADMIN
+from database import get_active_chart, get_chart, save_chart_texts, set_chart_premium
+from keyboards import BTN_ADMIN, BTN_ADMIN_FREE
 from states import AdminBroadcast
 
 log = logging.getLogger(__name__)
@@ -27,6 +28,8 @@ ADM_SALES = "💰 Продажи"
 ADM_CHARTS = "🌙 Карты"
 ADM_ACTIVITY = "🔥 Активность"
 ADM_BROADCAST = "📨 Рассылка"
+ADM_FREE_PREMIUM = "💎 Premium (free)"
+ADM_REGEN_PREMIUM = "🔄 Пересоздать Premium"
 
 KB_ADMIN = InlineKeyboardMarkup(
     inline_keyboard=[
@@ -38,6 +41,10 @@ KB_ADMIN = InlineKeyboardMarkup(
         [
             InlineKeyboardButton(text=ADM_CHARTS, callback_data="admin:charts"),
             InlineKeyboardButton(text=ADM_ACTIVITY, callback_data="admin:activity"),
+        ],
+        [
+            InlineKeyboardButton(text=ADM_FREE_PREMIUM, callback_data="admin:premium"),
+            InlineKeyboardButton(text=ADM_REGEN_PREMIUM, callback_data="admin:premium:force"),
         ],
         [InlineKeyboardButton(text=ADM_BROADCAST, callback_data="admin:broadcast")],
     ]
@@ -67,6 +74,43 @@ def _stats_text() -> str:
     ).replace(",", " ")
 
 
+async def grant_admin_premium(
+    msg: Message,
+    state: FSMContext,
+    *,
+    force: bool = False,
+) -> None:
+    from handlers import show_menu
+    from premium_chart import deliver_premium_chart
+
+    user_id = _uid(msg)
+    chart = get_active_chart(user_id)
+    if not chart:
+        await msg.answer("Нет активной карты. Создай карту через /start или 📋 Все карты.")
+        return
+
+    set_chart_premium(chart["id"], True)
+    if force:
+        save_chart_texts(chart["id"], full="")
+
+    name = chart["profile_name"]
+    if force:
+        await msg.answer(
+            f"🔓 Admin · Premium для «{name}»\n"
+            "Пересоздаю все 12 разделов с нуля…"
+        )
+    else:
+        await msg.answer(
+            f"🔓 Admin · Premium для «{name}» бесплатно.\n"
+            "Если карта уже была — покажу сохранённую версию."
+        )
+
+    chart = get_chart(chart["id"], user_id)
+    assert chart is not None
+    await deliver_premium_chart(msg, user_id, chart=chart)
+    await show_menu(msg, user_id)
+
+
 async def open_admin_panel(msg: Message, state: FSMContext) -> None:
     await state.clear()
     await msg.answer(
@@ -82,6 +126,16 @@ async def cmd_myid(msg: Message) -> None:
         f"Ваш Telegram ID: <code>{_uid(msg)}</code>",
         parse_mode="HTML",
     )
+
+
+@router.message(Command("freepremium"))
+@router.message(StateFilter(None), F.text == BTN_ADMIN_FREE)
+async def cmd_free_premium(msg: Message, state: FSMContext) -> None:
+    if not is_admin(_uid(msg)):
+        return
+    parts = (msg.text or "").split()
+    force = len(parts) > 1 and parts[1] in ("force", "new", "regen")
+    await grant_admin_premium(msg, state, force=force)
 
 
 @router.message(Command("admin"))
@@ -119,10 +173,17 @@ async def cb_admin(cb: CallbackQuery, state: FSMContext) -> None:
         await cb.answer("Сообщение недоступно", show_alert=True)
         return
 
-    action = cb.data.split(":")[1]
+    action = cb.data.split(":", 1)[1]
     await cb.answer()
 
     try:
+        if action == "premium":
+            await grant_admin_premium(cb.message, state, force=False)
+            return
+        if action == "premium:force":
+            await grant_admin_premium(cb.message, state, force=True)
+            return
+
         if action == "stats":
             await cb.message.answer(_stats_text(), parse_mode="HTML")
             return

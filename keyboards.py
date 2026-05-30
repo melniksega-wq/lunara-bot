@@ -34,6 +34,7 @@ BTN_QUESTIONS = "🔮 Вопросы"
 BTN_ASK = "✍️ Задать вопрос"
 BTN_HORO = "📅 Гороскопы"
 BTN_ADMIN = "⚙️ Admin"
+BTN_ADMIN_FREE = "🎁 Premium free"
 
 SUPPORT_URL = "https://t.me/sup_lunara"
 
@@ -55,7 +56,9 @@ def _btn(text: str) -> KeyboardButton:
 
 def menu_kb(is_premium: bool, *, show_admin: bool = False) -> ReplyKeyboardMarkup:
     row_charts = [_btn(BTN_MY_CHARTS), _btn(BTN_NEW_CHART)]
-    admin_row = [[_btn(BTN_ADMIN)]] if show_admin else []
+    admin_row = (
+        [[_btn(BTN_ADMIN), _btn(BTN_ADMIN_FREE)]] if show_admin else []
+    )
     if is_premium:
         rows = [
             row_charts,
